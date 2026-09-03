@@ -8,7 +8,11 @@ services:
     container_name: shannon-temporal
     command: ["server", "start-dev", "--db-filename", "/home/temporal/temporal.db", "--ip", "0.0.0.0"]
     ports:
-      - "127.0.0.1:7233:7233"   # gRPC
+      # Fork modification (Corvus): the host-side gRPC port is remapped to 7234 so
+      # this stack can run beside another Temporal deployment that already claims
+      # the host's 7233. Point the CLI at it with TEMPORAL_ADDRESS=127.0.0.1:7234.
+      # In-network addresses (worker container → shannon-temporal:7233) are unchanged.
+      - "127.0.0.1:7234:7233"   # gRPC (host remap)
       - "127.0.0.1:8233:8233"   # Web UI (built-in)
     volumes:
       - temporal-data:/home/temporal

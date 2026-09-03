@@ -5,13 +5,24 @@
  * the in-flight agents; a closed scan is read once from its result. Everything goes
  * straight to the frontend on 127.0.0.1:7233 — the gRPC port the compose file
  * publishes — so this needs Temporal up, but no worker of its own.
+ *
+ * Fork modification (Corvus): the address is read from TEMPORAL_ADDRESS so one
+ * host can run a second Shannon stack beside another Temporal deployment (the
+ * compose file remaps the published host port to 127.0.0.1:7234; the in-network
+ * address the worker container uses is unchanged). Default stays upstream's.
  */
 
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Client, Connection, WorkflowFailedError, WorkflowNotFoundError } from '@temporalio/client';
 import { ACTIVITY_TO_PROGRESS, type PipelineState } from './scan/pipeline.js';
 
-const ADDRESS = '127.0.0.1:7233';
+/**
+ * Read lazily at connection time, not import time: local mode loads ./.env from
+ * inside loadEnvironment(), which runs after this module is evaluated.
+ */
+function temporalAddress(): string {
+  return process.env.TEMPORAL_ADDRESS || '127.0.0.1:7233';
+}
 const NAMESPACE = 'default';
 const LIFECYCLE_RPC_DEADLINE_MS = 3_000;
 const OPEN_SCAN_WORKFLOW_QUERY =
@@ -97,7 +108,7 @@ let clientPromise: Promise<Client> | null = null;
 
 function getClient(): Promise<Client> {
   if (!clientPromise) {
-    const pending = Connection.connect({ address: ADDRESS, connectTimeout: LIFECYCLE_RPC_DEADLINE_MS }).then(
+    const pending = Connection.connect({ address: temporalAddress(), connectTimeout: LIFECYCLE_RPC_DEADLINE_MS }).then(
       (connection) => new Client({ connection, namespace: NAMESPACE }),
     );
     // A rejected connect must not be cached forever: clear the memo so the next call rebuilds

@@ -53,3 +53,21 @@ Consequence, as a standing rule for this fork: **fork changes never edit
 so would put the inherited evidence lines into a scanned diff. If that ever
 becomes necessary, the right answer is to rethink, not to add an allowlist.
 
+## 2 — Deployment seams (pulled ahead of the larger engine changes)
+
+Small changes needed to run a second Shannon stack on a host that already
+runs another Temporal deployment:
+
+- `docker-compose.yml`: the temporal service's published host gRPC port is
+  remapped `127.0.0.1:7234:7233` (upstream publishes 7233; the host's 7233
+  serves the other deployment). In-network addresses — the worker container
+  reaching `shannon-temporal:7233` — are unchanged.
+- `apps/cli/src/temporal-client.ts`: the CLI's Temporal address is read from
+  `TEMPORAL_ADDRESS` (default unchanged: `127.0.0.1:7233`). Read lazily at
+  connection time, because local mode loads `./.env` after module evaluation.
+- `apps/cli/src/index.ts`: `SHANNON_ALLOW_ROOT=1` opts in to running the CLI
+  as root/sudo for deployments where a root service (a container-hosted
+  worker) spawns it. Upstream's refusal — bind-mounted files come back owned
+  by root — stays the default, and the trade-off is the operator's.
+- `.env.example`: documents both additions.
+

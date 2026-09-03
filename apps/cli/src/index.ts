@@ -34,8 +34,14 @@ import { resolveDefaultWorkspace } from './workspaces.js';
  * (docker.ts) stamps bind-mounted files with the invoking user's real uid/gid; under
  * sudo that uid is 0, so the repo, workspace, and report files would come back
  * owned by root instead of the person who ran the scan.
+ *
+ * Fork modification (Corvus): an explicit SHANNON_ALLOW_ROOT=1 opts back in for
+ * deployments where the CLI is spawned by a service that already runs as root
+ * (e.g. a container-hosted worker). The file-ownership trade-off above is then
+ * the operator's to manage. Refusing remains the default.
  */
 function blockSudo(): void {
+  if (process.env.SHANNON_ALLOW_ROOT === '1') return;
   const isSudo = !!process.env.SUDO_USER;
   const isRoot = process.geteuid?.() === 0;
   if (!isSudo && !isRoot) return;
