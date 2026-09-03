@@ -9,8 +9,6 @@
  * in the current working directory.
  */
 
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { ArgError, parseArgs, YES_FLAGS } from './args.js';
 import { build } from './commands/build.js';
 import { logs } from './commands/logs.js';
@@ -406,11 +404,14 @@ async function main(): Promise<void> {
   }
 }
 
-// Fork modification (Corvus): run only as a CLI entry point. The unconditional
-// top-level `main()` made this module import-unsafe (any import executed the CLI);
-// the guard mirrors the worker's entry guard so tests can import parseStartArgs.
-const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : undefined;
-if (invokedPath === fileURLToPath(import.meta.url)) {
+// Fork modification (Corvus): skip the auto-run only under the vitest worker, so
+// the test rig can import parseStartArgs without executing the CLI. Upstream's
+// unconditional `main()` made the module import-unsafe, but a path-equality guard
+// (like the worker's) would break local mode: the root ./shannon wrapper sets
+// SHANNON_LOCAL and *imports* dist/index.mjs, so argv[1] is the wrapper, not this
+// module. Vitest sets the VITEST env var in its workers — the one importer that
+// must not auto-run main().
+if (process.env.VITEST === undefined) {
   main().catch((err) => {
     if (err instanceof ArgError) {
       failUsage(err.message, `Run "${commandPrefix()} help" for usage`);

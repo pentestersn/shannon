@@ -69,6 +69,10 @@ runs another Temporal deployment:
   as root/sudo for deployments where a root service (a container-hosted
   worker) spawns it. Upstream's refusal — bind-mounted files come back owned
   by root — stays the default, and the trade-off is the operator's.
+  Container side: `entrypoint.sh` runs the worker as root directly when the
+  remap carries UID 0 — `groupadd`/`useradd` cannot create a second
+  UID/GID 0, and under `set -e` the remap path aborted the container at
+  startup (observed exit code 4).
 - `apps/cli/src/docker.ts`: container queries use the `{{.Label "k"}}`
   template accessor instead of `{{ index .Labels "k" }}`. Docker 29's
   `docker ps` template context exposes `.Labels` as a slice, so upstream's
