@@ -1,3 +1,28 @@
+> [!IMPORTANT]
+> **This is a fork** of [KeygraphHQ/shannon](https://github.com/KeygraphHQ/shannon)
+> (upstream commit [`e92ee61`](https://github.com/KeygraphHQ/shannon/commit/e92ee61c05ec6ee91b05fb99499869a8ec77abe1)),
+> maintained as the scan engine of the [Corvus](https://github.com/pentestersn) security-assessment SaaS.
+> Shannon itself was created by **Keygraph** — full credit and thanks to the upstream authors.
+>
+> **License:** AGPL-3.0-only, unchanged. This fork publishes its complete
+> source, including every modification, on the same terms as upstream (see
+> [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+> Per-file copyright headers from upstream are preserved; fork modifications
+> add their own copyright lines.
+>
+> **Honest security posture note:** Shannon's worker container runs with
+> unfiltered network egress (`seccomp=unconfined`, no network policy, host
+> `/etc/hosts` forwarded by default — see `SHANNON_FORWARD_HOSTS` in
+> `.env.example`). The rules of engagement in a scan config are prompt-level
+> guidance, not a network enforcement boundary. Treat the container as a
+> full-egress environment and only point it at targets you are authorized to
+> test.
+>
+> **Fork modifications** (see [FORK.md](FORK.md) for the complete, current list):
+> CI for the fork itself; then, as they land: a DAST/remote-only scan mode,
+> per-stage model routing, a hard spend cap, and an optional governed-egress
+> mode for proxy-enforced deployments.
+
 > [!NOTE]
 > **[Shannon 3.0 is live](https://github.com/KeygraphHQ/shannon/discussions/439):** deeper security code analysis, more thoroughly vetted findings, a rebuilt CLI, native CI/CD, professional PDF reports, and SARIF.
 
