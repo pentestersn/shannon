@@ -9,7 +9,7 @@ import type {
   CapellaStage,
   SarifRef,
 } from '../ai/sast/types.js';
-import type { VulnClass } from '../types/config.js';
+import type { TargetMode, VulnClass } from '../types/config.js';
 import type { ErrorCode } from '../types/errors.js';
 import type { AgentMetrics } from '../types/metrics.js';
 import type { ReconciliationClass } from '../types/reconciliation.js';
@@ -88,11 +88,16 @@ export interface NonFatalFailure {
   readonly error: string;
 }
 
+/** Fork addition (Corvus): 'dast' selects the black-box prompt set. Re-exported for the workflow boundary. */
+export type { TargetMode } from '../types/config.js';
+
 export interface PipelineInput {
   webUrl: string;
   repoPath: string;
   configPath?: string;
   pipelineTestingMode?: boolean;
+  /** Fork addition (Corvus): 'dast' selects the black-box prompt set. Default 'deep'. */
+  targetMode?: TargetMode;
   workflowId?: string; // Used for audit correlation
   sessionId?: string; // Workspace directory name (distinct from workflowId for named workspaces)
   resumeFromWorkspace?: string; // Workspace name to resume from

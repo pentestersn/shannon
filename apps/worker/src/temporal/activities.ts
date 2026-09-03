@@ -106,6 +106,7 @@ import type {
   ReconciliationActivityResult,
   ResumeState,
   SurfaceReportActivityResult,
+  TargetMode,
 } from './shared.js';
 
 // Max lengths to prevent Temporal protobuf buffer overflow
@@ -131,6 +132,8 @@ export interface ActivityInput {
   configPath?: string;
   outputPath?: string;
   pipelineTestingMode?: boolean;
+  /** Fork addition (Corvus): 'dast' routes prompt loading to prompts/dast/ (black-box set). */
+  targetMode?: TargetMode;
   workflowId: string;
   sessionId: string;
 
@@ -419,6 +422,7 @@ async function runAgentActivity(
         assessmentDate: input.assessmentDate,
         analysisClasses: resolveAnalysisClasses(input),
         ...(input.promptDir !== undefined && { promptDir: input.promptDir }),
+        ...(input.targetMode !== undefined && { targetMode: input.targetMode }),
         ...(input.configYAML !== undefined && { configYAML: input.configYAML }),
         ...(input.failedClasses !== undefined && { failedClasses: input.failedClasses }),
         ...(customTools && { customTools }),

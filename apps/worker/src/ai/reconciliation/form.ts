@@ -10,6 +10,7 @@ import path from 'node:path';
 import { DEFAULT_DELIVERABLES_SUBDIR, WORKSPACES_DIR } from '../../paths.js';
 import { loadPrompt } from '../../services/prompt-manager.js';
 import type { ActivityLogger } from '../../types/activity-logger.js';
+import type { TargetMode } from '../../types/config.js';
 import type { ReconciliationClass } from '../../types/reconciliation.js';
 import { materializeSourceJail } from '../pi/source-jail.js';
 import {
@@ -63,6 +64,10 @@ export interface FormClassExploitTasksInput {
   readonly supplementalRef: ArtifactRef<'supplemental-observations'>;
   readonly deliverablesSubdir?: string;
   readonly webUrl?: string;
+  // Fork modification (Corvus): selects the black-box task-formation class policy from
+  // prompts/dast/ for remote-only runs; the white-box policy reads jailed source that a
+  // DAST engagement does not have.
+  readonly targetMode?: TargetMode;
 }
 
 export interface FormClassExploitTasksResult extends FormSuccess {
@@ -184,6 +189,7 @@ async function loadClassPolicy(
   jailPath: string,
   webUrl: string,
   logger: ActivityLogger,
+  targetMode?: TargetMode,
 ): Promise<string> {
   try {
     return await loadPrompt(
@@ -192,6 +198,10 @@ async function loadClassPolicy(
       null,
       false,
       logger,
+      undefined,
+      // Fork modification (Corvus): DAST runs group observations under the black-box class
+      // policy instead of the white-box one, which references jailed source that does not exist.
+      targetMode,
     );
   } catch (error) {
     if (isTransientPromptIoFailure(error)) {
@@ -354,6 +364,7 @@ export function createFormClassExploitTasks(
         jail.dir,
         input.webUrl ?? 'https://not-applicable.invalid',
         logger,
+        input.targetMode,
       );
       checkCancellation(signal);
 

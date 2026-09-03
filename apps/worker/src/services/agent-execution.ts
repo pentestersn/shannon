@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Keygraph, Inc.
+// Copyright (C) 2026 Corvus contributors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License version 3
@@ -54,6 +55,8 @@ export interface AgentExecutionInput {
   configData?: import('../types/config.js').DistributedConfig | undefined;
   configYAML?: string | undefined;
   pipelineTestingMode?: boolean | undefined;
+  /** Fork addition (Corvus): 'dast' loads the black-box prompt set for this agent. */
+  targetMode?: import('../types/config.js').TargetMode | undefined;
   attemptNumber: number;
   /** Workflow-resolved fixed scope; prompt generation never derives this from public config. */
   analysisClasses: readonly import('../types/config.js').VulnClass[];
@@ -162,6 +165,7 @@ export class AgentExecutionService {
       configData,
       configYAML,
       pipelineTestingMode = false,
+      targetMode,
       attemptNumber,
       assessmentDate,
       analysisClasses,
@@ -214,6 +218,7 @@ export class AgentExecutionService {
         pipelineTestingMode,
         logger,
         promptDir,
+        targetMode,
       );
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);

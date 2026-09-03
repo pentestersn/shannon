@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Keygraph, Inc.
+// Copyright (C) 2026 Corvus contributors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License version 3
@@ -8,7 +9,14 @@ import { fs, path } from 'zx';
 import { PROMPTS_DIR } from '../paths.js';
 import { PLAYWRIGHT_SESSION_MAPPING } from '../session-manager.js';
 import type { ActivityLogger } from '../types/activity-logger.js';
-import type { Authentication, DistributedConfig, DistributedReportConfig, Rule, VulnClass } from '../types/config.js';
+import type {
+  Authentication,
+  DistributedConfig,
+  DistributedReportConfig,
+  Rule,
+  TargetMode,
+  VulnClass,
+} from '../types/config.js';
 import { assertFixedAnalysisScope } from '../types/run-state.js';
 import { isGlobPattern } from '../utils/glob.js';
 import { handlePromptError, PentestError } from './error-handling.js';
@@ -272,19 +280,38 @@ async function buildLoginInstructions(
 }
 
 // Pure function: Process @include() directives
-async function processIncludes(content: string, baseDir: string): Promise<string> {
+//
+// Fork modification (Corvus): `baseDir` may be a variant prompt directory (pipeline-testing/,
+// dast/) while `fallbackDir` is the base prompts directory it was derived from. An include is
+// resolved against the variant first — so a variant can override any shared file by placing a
+// same-named copy in its own shared/ — and, when absent there, falls back to the base directory.
+// Upstream behavior is unchanged whenever baseDir === fallbackDir, and pipeline-testing keeps
+// resolving its own shared/_filesystem.txt exactly as before (found on the first lookup).
+async function processIncludes(content: string, baseDir: string, fallbackDir: string): Promise<string> {
   const includeRegex = /@include\(([^)]+)\)/g;
-  const resolvedBase = path.resolve(baseDir);
+  const resolvedFallback = path.resolve(fallbackDir);
+
+  function assertWithin(includePath: string, root: string, rawPath: string): void {
+    const resolvedRoot = path.resolve(root);
+    if (!includePath.startsWith(resolvedRoot + path.sep) && includePath !== resolvedRoot) {
+      throw new PentestError(`Path traversal detected in @include(): ${rawPath}`, 'prompt', false, {
+        includePath,
+        baseDir: resolvedRoot,
+      });
+    }
+  }
 
   const replacements: IncludeReplacement[] = await Promise.all(
     Array.from(content.matchAll(includeRegex)).map(async (match) => {
       const rawPath = match[1] ?? '';
-      const includePath = path.resolve(baseDir, rawPath);
-      if (!includePath.startsWith(resolvedBase + path.sep) && includePath !== resolvedBase) {
-        throw new PentestError(`Path traversal detected in @include(): ${rawPath}`, 'prompt', false, {
-          includePath,
-          baseDir: resolvedBase,
-        });
+      const variantPath = path.resolve(baseDir, rawPath);
+      let includePath: string;
+      if (variantPath !== resolvedFallback && (await fs.pathExists(variantPath))) {
+        includePath = variantPath;
+        assertWithin(includePath, baseDir, rawPath);
+      } else {
+        includePath = path.resolve(fallbackDir, rawPath);
+        assertWithin(includePath, fallbackDir, rawPath);
       }
       const sharedContent = await fs.readFile(includePath, 'utf8');
       return {
@@ -502,6 +529,10 @@ function resolvePromptDir(promptDir: string | undefined): string {
 }
 
 // Pure function: Load and interpolate prompt template
+//
+// Fork modification (Corvus): `targetMode: 'dast'` selects the black-box prompt set from
+// prompts/dast/ — the same one-ternary mechanism pipelineTestingMode already uses. Pipeline
+// testing keeps precedence: it overrides every mode because it is a test harness, not a scan.
 export async function loadPrompt(
   promptName: string,
   variables: PromptVariables,
@@ -509,14 +540,21 @@ export async function loadPrompt(
   pipelineTestingMode: boolean = false,
   logger: ActivityLogger,
   promptDir?: string,
+  targetMode?: TargetMode,
 ): Promise<string> {
   try {
     const basePromptsDir = resolvePromptDir(promptDir);
-    const promptsDir = pipelineTestingMode ? path.join(basePromptsDir, 'pipeline-testing') : basePromptsDir;
+    const promptsDir = pipelineTestingMode
+      ? path.join(basePromptsDir, 'pipeline-testing')
+      : targetMode === 'dast'
+        ? path.join(basePromptsDir, 'dast')
+        : basePromptsDir;
     const promptPath = path.join(promptsDir, `${promptName}.txt`);
 
     if (pipelineTestingMode) {
       logger.info(`Using pipeline testing prompt: ${promptPath}`);
+    } else if (targetMode === 'dast') {
+      logger.info(`Using DAST prompt: ${promptPath}`);
     }
 
     if (!(await fs.pathExists(promptPath))) {
@@ -541,7 +579,7 @@ export async function loadPrompt(
     let template = await fs.readFile(promptPath, 'utf8');
 
     // 4. Process @include directives
-    template = await processIncludes(template, promptsDir);
+    template = await processIncludes(template, promptsDir, basePromptsDir);
 
     // 5. Interpolate variables and return final prompt
     return await interpolateVariables(template, enhancedVariables, config, logger, basePromptsDir);

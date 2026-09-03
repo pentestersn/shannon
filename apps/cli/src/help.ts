@@ -27,7 +27,10 @@ const HELP_OPTION: readonly [string, string] = ['-h, --help', 'Show this help'];
  */
 export const START_OPTIONS: readonly (readonly [string, string])[] = [
   ['-u, --url <url>', 'Target URL (required)'],
-  ['-r, --repo <path>', 'Repository path (required)'],
+  [
+    '-r, --repo <path>',
+    'Repository path. Fork (Corvus): optional — omit it to run a black-box DAST scan (no source code)',
+  ],
   ['-c, --config <path>', 'Configuration file (YAML)'],
   ['-o, --output <path>', 'Copy deliverables to this directory after the run'],
   ['-w, --workspace <name>', 'Named workspace (auto-resumes if it exists)'],
@@ -38,12 +41,14 @@ export const START_OPTIONS: readonly (readonly [string, string])[] = [
 
 const COMMAND_HELP: Readonly<Record<string, CommandHelp>> = {
   start: {
-    usage: ['start -u <url> -r <path> [options]'],
-    description: 'Start a pentest scan.',
+    usage: ['start -u <url> [-r <path>] [options]'],
+    description:
+      'Start a pentest scan. With --repo, source code is ground truth (deep mode); without it, the scan runs black-box against the URL only (DAST mode).',
     examples: [
       'start -u https://example.com -r ./my-repo',
       'start -u https://example.com -r /path/to/repo -c config.yaml -w q1-audit',
       'start -u https://example.com -r ./my-repo --follow',
+      'start -u https://example.com -w external-audit --follow',
     ],
   },
   stop: {

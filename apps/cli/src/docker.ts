@@ -411,6 +411,8 @@ export interface WorkerOptions {
   outputDir?: string;
   workspace: string;
   pipelineTesting?: boolean;
+  /** Fork addition (Corvus): 'dast' runs the worker with the black-box prompt set. */
+  mode?: 'deep' | 'dast';
   keepContainer?: boolean;
   piAuthHostPath?: string;
 }
@@ -504,6 +506,12 @@ export function spawnWorker(opts: WorkerOptions): ChildProcess {
   args.push('--workspace', opts.workspace);
   if (opts.pipelineTesting) {
     args.push('--pipeline-testing');
+  }
+  // Fork addition (Corvus): target mode. `repo` is always mounted — in DAST mode it is the
+  // synthetic, empty source root start() created inside the workspace — so the mode flag, not
+  // the path shape, is what tells the worker which prompt set to load.
+  if (opts.mode === 'dast') {
+    args.push('--mode', 'dast');
   }
 
   // Inherit stderr so `docker run` daemon errors surface to the user;

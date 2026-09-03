@@ -35,7 +35,13 @@ import { tailUntilComplete } from './logs.js';
 
 export interface StartArgs {
   url: string;
-  repo: string;
+  /**
+   * Fork modification (Corvus): optional repository. Present → deep mode (source code is
+   * ground truth). Absent → DAST mode: the scan runs black-box against the URL only and
+   * start() materializes a synthetic, empty source root inside the workspace so every
+   * path-based contract downstream (mounts, overlays, git checkpoints) keeps its shape.
+   */
+  repo?: string;
   config?: string;
   workspace?: string;
   output?: string;
@@ -44,6 +50,9 @@ export interface StartArgs {
   follow: boolean;
   version: string;
 }
+
+/** Fork addition (Corvus): target-mode literal shared by start() and spawnWorker options. */
+export type TargetMode = 'deep' | 'dast';
 
 const LAUNCH_STATE_SCHEMA_VERSION = 1 as const;
 const LAUNCH_STATE_FILENAME = 'launch.json';
@@ -229,12 +238,21 @@ export async function start(args: StartArgs): Promise<void> {
   if (!creds.valid) {
     fail(creds.error ?? 'Invalid credentials');
   }
-  const repo = resolveRepo(args.repo);
   const config = args.config ? resolveConfig(args.config) : undefined;
   const workspacesDir = getWorkspacesDir();
   const workspace =
     args.workspace ?? `${new URL(args.url).hostname.replace(/[^a-zA-Z0-9-]/g, '-')}_shannon-${Date.now()}`;
   const workspacePath = path.join(workspacesDir, workspace);
+  // Fork modification (Corvus): DAST mode. Without -r the scan runs black-box: the source root
+  // becomes a synthetic, empty directory inside the workspace. Every path-based contract
+  // downstream (the :ro repo mount, writable overlays, git checkpoints, preflight validation)
+  // keeps its exact deep-mode shape; what changes is that no prompt ever sends an agent to
+  // read code (prompts/dast/) and the pre-recon code-analysis agent is skipped by the workflow.
+  const targetMode: TargetMode = args.repo !== undefined ? 'deep' : 'dast';
+  const repo: { hostPath: string; containerPath: string } =
+    targetMode === 'deep'
+      ? resolveRepo(args.repo as string)
+      : { hostPath: path.join(workspacePath, 'source'), containerPath: '/repos/target-source' };
   const requestedOutputDir = args.output ? path.resolve(expandHome(args.output)) : undefined;
   const launchDecision = classifyWorkspaceLaunch(workspacePath, args.url, requestedOutputDir);
 
@@ -277,6 +295,8 @@ export async function start(args: StartArgs): Promise<void> {
   }
 
   // 5. Pre-create overlay mount points (:ro mounts cannot create them).
+  // In DAST mode this is also what materializes the synthetic source root: repo.hostPath is
+  // <workspace>/source, and these recursive mkdirs create it empty before Docker mounts it.
   const shannonDir = path.join(repo.hostPath, '.shannon');
   for (const dir of ['deliverables', 'scratchpad', '.playwright-cli']) {
     fs.mkdirSync(path.join(shannonDir, dir), { recursive: true });
@@ -326,6 +346,7 @@ export async function start(args: StartArgs): Promise<void> {
     ...(outputDir && { outputDir }),
     workspace,
     ...(args.pipelineTesting && { pipelineTesting: true }),
+    ...(targetMode === 'dast' && { mode: 'dast' }),
     ...(args.keepContainer && { keepContainer: true }),
     ...(shouldUsePiAuth() && { piAuthHostPath: resolveHostPiAuthPath() }),
   });

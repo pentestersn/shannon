@@ -11,6 +11,7 @@ import type { ArtifactRef } from '../ai/reconciliation/contracts.js';
 import type { StageMetrics } from '../ai/reconciliation/stage-contracts.js';
 import type { SarifRef } from '../ai/sast/types.js';
 import type { ReconciliationClass } from '../types/reconciliation.js';
+import type { TargetMode } from './shared.js';
 
 const MINUTE_MS = 60 * 1_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -74,6 +75,9 @@ export interface EnrichClassSastObservationsActivityInput extends Reconciliation
 export interface FormClassExploitTasksActivityInput extends ReconciliationActivityBaseInput {
   readonly producerRef: ArtifactRef<'producer-observations'>;
   readonly supplementalRef: ArtifactRef<'supplemental-observations'>;
+  // Fork modification (Corvus): forwarded to the task-formation class-policy prompt selection
+  // so DAST runs load the black-box policy from prompts/dast/.
+  readonly targetMode?: TargetMode;
 }
 
 export interface FormClassExploitTasksActivityResult {

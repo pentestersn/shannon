@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 // Copyright (C) 2026 Keygraph, Inc.
+// Copyright (C) 2026 Corvus contributors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License version 3
@@ -90,7 +91,7 @@ import {
   syncPlaywrightStealthConfig,
 } from './activities.js';
 import { createReconciliationActivityRegistry } from './reconcile-activities.js';
-import type { AgenticSastInput, PipelineInput, PipelineProgress, PipelineState } from './shared.js';
+import type { AgenticSastInput, PipelineInput, PipelineProgress, PipelineState, TargetMode } from './shared.js';
 
 dotenv.config();
 
@@ -245,6 +246,8 @@ interface CliArgs {
   configPath?: string;
   customerOutputPath?: string;
   pipelineTestingMode: boolean;
+  /** Fork addition (Corvus): 'dast' runs the black-box prompt set and skips pre-recon. */
+  targetMode?: TargetMode;
   resumeFromWorkspace?: string;
 }
 
@@ -259,10 +262,14 @@ function showUsage(): void {
   console.log('  --config <path>        Configuration file path');
   console.log('  --workspace <name>     Resume from existing workspace');
   console.log('  --output <path>        Stable mounted path for final customer report copies');
-  console.log('  --pipeline-testing     Use minimal prompts for fast testing\n');
+  console.log('  --pipeline-testing     Use minimal prompts for fast testing');
+  console.log("  --mode <deep|dast>     Fork (Corvus): 'dast' runs black-box, no source prompts\n");
 }
 
-function parseCliArgs(argv: string[]): CliArgs {
+// Fork modification (Corvus): exported so the DAST/deep `--mode` parsing seam is
+// covered by the vitest rig. Pure function — the module stays import-safe via the
+// entry guard at the bottom of this file.
+export function parseCliArgs(argv: string[]): CliArgs {
   if (argv.includes('--help') || argv.includes('-h') || argv.length === 0) {
     showUsage();
     process.exit(0);
@@ -275,6 +282,7 @@ function parseCliArgs(argv: string[]): CliArgs {
   let configPath: string | undefined;
   let customerOutputPath: string | undefined;
   let pipelineTestingMode = false;
+  let targetMode: TargetMode | undefined;
   let resumeFromWorkspace: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
@@ -311,6 +319,19 @@ function parseCliArgs(argv: string[]): CliArgs {
       }
     } else if (arg === '--pipeline-testing') {
       pipelineTestingMode = true;
+    } else if (arg === '--mode') {
+      // Fork addition (Corvus): explicit target-mode switch. The repository path is always
+      // supplied — in DAST mode the CLI passes a synthetic, empty source root so every
+      // path-based contract holds — so the mode, not the path, is what selects the prompts.
+      const nextArg = argv[i + 1];
+      if (nextArg === 'deep' || nextArg === 'dast') {
+        targetMode = nextArg;
+        i++;
+      } else {
+        console.error(`Error: --mode must be 'deep' or 'dast' (got: ${nextArg ?? 'nothing'})`);
+        showUsage();
+        process.exit(1);
+      }
     } else if (arg && !arg.startsWith('-')) {
       if (!webUrl) {
         webUrl = arg;
@@ -338,6 +359,7 @@ function parseCliArgs(argv: string[]): CliArgs {
     taskQueue,
     ...(workflowId && { workflowId }),
     pipelineTestingMode,
+    ...(targetMode && { targetMode }),
     ...(configPath && { configPath }),
     ...(customerOutputPath && { customerOutputPath }),
     ...(resumeFromWorkspace && { resumeFromWorkspace }),
@@ -551,6 +573,7 @@ function buildPipelineInput(
     sessionId: workspace.sessionId,
     ...(args.configPath && { configPath: args.configPath }),
     ...(args.pipelineTestingMode && { pipelineTestingMode: args.pipelineTestingMode }),
+    ...(args.targetMode && { targetMode: args.targetMode }),
     ...(workspace.isResume && args.resumeFromWorkspace && { resumeFromWorkspace: args.resumeFromWorkspace }),
     ...(workspace.terminatedWorkflows.length > 0 && { terminatedWorkflows: workspace.terminatedWorkflows }),
     ...(args.customerOutputPath !== undefined && { customerOutputPath: args.customerOutputPath }),

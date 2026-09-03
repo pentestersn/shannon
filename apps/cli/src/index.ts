@@ -9,6 +9,8 @@
  * in the current working directory.
  */
 
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ArgError, parseArgs, YES_FLAGS } from './args.js';
 import { build } from './commands/build.js';
 import { logs } from './commands/logs.js';
@@ -97,7 +99,7 @@ function renderStartOptions(): string {
 function renderUsage(prefix: string, mode: Mode): string {
   const rows: ReadonlyArray<readonly [string, string]> = [
     ...(mode === 'local' ? [] : [[`${prefix} setup`, 'Configure credentials'] as const]),
-    [`${prefix} start --url <url> --repo <path> [options]`, 'Start a pentest scan'],
+    [`${prefix} start --url <url> [--repo <path>] [options]`, 'Start a pentest scan'],
     [`${prefix} stop [<workspace>] [--yes]`, 'Stop one scan (default: the single running scan)'],
     [`${prefix} stop --all [--yes]`, 'Stop all scans (Temporal stays up)'],
     [`${prefix} reset`, 'Stop everything and wipe all Temporal data'],
@@ -175,7 +177,8 @@ No credentials configured yet. To get started, run:
 
 interface ParsedStartArgs {
   url: string;
-  repo: string;
+  /** Fork modification (Corvus): optional — absent means DAST mode (black-box, no source). */
+  repo?: string;
   config?: string;
   workspace?: string;
   output?: string;
@@ -184,7 +187,9 @@ interface ParsedStartArgs {
   follow: boolean;
 }
 
-function parseStartArgs(argv: string[]): ParsedStartArgs {
+// Fork modification (Corvus): exported so the optional `-r/--repo` → DAST seam is
+// covered by the vitest rig. Pure function — no side effects before validation.
+export function parseStartArgs(argv: string[]): ParsedStartArgs {
   const { flags, values } = parseArgs(argv, {
     values: {
       url: ['-u', '--url'],
@@ -201,9 +206,8 @@ function parseStartArgs(argv: string[]): ParsedStartArgs {
   });
 
   const url = values.url ?? '';
-  const repo = values.repo ?? '';
-  if (!url || !repo) {
-    failUsage('--url and --repo are required', `Usage: ${commandPrefix()} start -u <url> -r <path>`);
+  if (!url) {
+    failUsage('--url is required', `Usage: ${commandPrefix()} start -u <url> [-r <path>]`);
   }
 
   try {
@@ -214,7 +218,9 @@ function parseStartArgs(argv: string[]): ParsedStartArgs {
 
   return {
     url,
-    repo,
+    // Fork modification (Corvus): no --repo → DAST mode; start() materializes a synthetic,
+    // empty source root so every path-based contract downstream keeps its shape.
+    ...(values.repo && { repo: values.repo }),
     pipelineTesting: !!flags.pipelineTesting,
     keepContainer: !!flags.keepContainer,
     follow: !!flags.follow,
@@ -400,9 +406,15 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  if (err instanceof ArgError) {
-    failUsage(err.message, `Run "${commandPrefix()} help" for usage`);
-  }
-  crash(err);
-});
+// Fork modification (Corvus): run only as a CLI entry point. The unconditional
+// top-level `main()` made this module import-unsafe (any import executed the CLI);
+// the guard mirrors the worker's entry guard so tests can import parseStartArgs.
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : undefined;
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    if (err instanceof ArgError) {
+      failUsage(err.message, `Run "${commandPrefix()} help" for usage`);
+    }
+    crash(err);
+  });
+}

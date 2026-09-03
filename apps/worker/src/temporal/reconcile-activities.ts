@@ -566,6 +566,8 @@ export function createReconciliationActivityRegistry(
             producerRef: input.producerRef,
             supplementalRef: input.supplementalRef,
             ...(bindings.webUrl !== undefined && { webUrl: bindings.webUrl }),
+            // Fork modification (Corvus): task-formation prompt selection is mode-aware.
+            ...(input.targetMode !== undefined && { targetMode: input.targetMode }),
           },
           stageRuntime,
         ),

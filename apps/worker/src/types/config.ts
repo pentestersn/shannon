@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Keygraph, Inc.
+// Copyright (C) 2026 Corvus contributors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License version 3
@@ -25,6 +26,17 @@ export interface Rules {
 }
 
 export type VulnClass = 'injection' | 'xss' | 'auth' | 'authz' | 'ssrf';
+
+/**
+ * Fork addition (Corvus): how much of the target a scan can consult.
+ *
+ * `deep` — upstream behavior: source code is ground truth, read from the repository.
+ * `dast`  — black-box mode: no repository was supplied. The pipeline still receives a source
+ *           root path (a synthetic, empty directory) so every path-based contract keeps its
+ *           shape, but the prompt set never sends an agent to read code, and the pre-recon
+ *           code-analysis agent is skipped outright.
+ */
+export type TargetMode = 'deep' | 'dast';
 
 export const ALL_VULN_CLASSES: readonly VulnClass[] = ['injection', 'xss', 'auth', 'authz', 'ssrf'];
 

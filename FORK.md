@@ -77,3 +77,85 @@ runs another Temporal deployment:
   scan workers"). Verified live: `stop --all` works against this engine now.
 - `.env.example`: documents both env additions.
 
+## 3 — DAST (remote-only) scan mode
+
+The engine change. Upstream requires `-r/--repo` and writes every analysis
+prompt around jailed source ("Code is Ground Truth"). This fork adds a
+black-box mode for targets whose source is not available.
+
+- **Selection:** `shannon start -u <url>` without `-r` runs DAST; `-r` keeps
+  deep (white-box) mode. The CLI materializes a synthetic, empty source root
+  (`<workspace>/source`, mounted at `/repos/target-source`) so every
+  path-based contract downstream keeps its shape, and passes `--mode dast`
+  to the worker container. `--mode <deep|dast>` is a visible worker flag
+  (`apps/worker/src/temporal/worker.ts`). Enabling agentic SAST or feeding
+  SAST SARIF in DAST mode is a configuration error, rejected before any
+  agent runs.
+- **Pipeline shape in DAST:** the pre-recon code phase is skipped (there is
+  no code to analyze); recon runs first and produces the architecture
+  intelligence from live behavior; the five class lanes run concurrently
+  exactly as in deep mode; reconciliation, task formation, exploitation,
+  and reporting are unchanged.
+- **Prompt set:** `apps/worker/prompts/dast/` — 19 prompt variants plus one
+  shared include. Selection reuses the same one-ternary mechanism
+  `pipelineTestingMode` already has in
+  `apps/worker/src/services/prompt-manager.ts` (`targetMode === 'dast'` →
+  `prompts/dast/`); pipeline-testing keeps precedence. `@include` files
+  resolve dast-dir first, then fall back to the base prompts dir, so a dast
+  prompt can reuse upstream shared includes verbatim while
+  `dast/shared/exploitation/_task-formation-procedure.txt` overrides its
+  base namesake.
+- **Fail-loud, no silent fallback:** a prompt that has no dast variant
+  throws (`Prompt file not found`) instead of silently loading the
+  white-box prompt. Deliberate: a forgotten variant must be loud, never a
+  silent mode confusion. Upstream's pipeline-testing directory set the
+  precedent — a complete mirror — and DAST follows it for every reachable
+  prompt.
+- **Prompts with no dast variant, on purpose:** `task-formation-miscellaneous`
+  (the miscellaneous queue is seeded canonically empty in DAST — no static
+  analysis ran — so reconciliation sees fewer than two observations and the
+  model is never invoked), `sast-enrichment-*` (enrichment short-circuits
+  when no SARIF was fed: zero model calls), and `pre-recon-code` (phase
+  skipped). `exploit-miscellaneous` is unreachable for the same empty-queue
+  reason but ships a variant anyway — one cheap file that degrades
+  gracefully if that reachability analysis is ever wrong.
+- **Ground-truth inversion:** the white-box prompts treat source code as
+  ground truth; the dast variants treat observed behavior, rendered output,
+  and observed access decisions as ground truth. Every variant carries a
+  black-box engagement guard (the repository directory is an empty
+  placeholder; do not read, search, or analyze source files) and omits
+  `code_locations` entirely rather than letting a model fabricate them.
+  Queue field names are kept verbatim so downstream exploit and
+  task-formation references stay valid — with behavioral semantics for the
+  code-location fields (`vulnerable_code_location` becomes "the observation
+  that evidences the flaw", and inferred sinks are labeled as inferred).
+- **In-band evidence discipline:** upstream's miscellaneous lane already
+  constrained out-of-band callbacks ("standing up out-of-band callbacks or
+  attacker-controlled infrastructure falls outside [scope]... record it as
+  a real but `blocked` finding"), yet its base SSRF exploit prompt
+  recommends Burp Collaborator / Interactsh / attacker.com for validation.
+  In DAST the fork extends the in-band-only discipline to SSRF: internal
+  service access, cloud metadata retrieval, and port scans remain provable
+  in-band (the target performs the outbound request and its response or
+  side effect surfaces through the application's own response); a purely
+  blind sink with no in-band signal is recorded `blocked` — an external
+  operational constraint — never `exploited` or `false_positive`. One
+  upstream line is kept verbatim: the RFI witness example
+  `http://attacker.com/shell.txt` in `vuln-injection`, which sits in a
+  hold-for-the-exploit-phase witness list, explicitly not executed during
+  analysis.
+- **Task-formation seam:** `targetMode` is plumbed through the workflow →
+  `formClassExploitTasks` activity → `form.ts`'s `loadClassPolicy`, so
+  observation grouping loads the black-box class policy in DAST runs.
+- **Testability exports:** `parseCliArgs` (worker) and `parseStartArgs`
+  (CLI) are exported, and `apps/cli/src/index.ts` gained a standard entry
+  guard — upstream's `main()` ran unconditionally at import, making the
+  module import-unsafe. The guard mirrors the worker's existing one.
+- **Test rig:** vitest at the workspace root (`pnpm test`), covering the
+  fork's seams only — DAST prompt selection, include fallback/override
+  ordering, pipeline-testing precedence, fail-loud missing variants, and
+  `--mode`/optional-`-r` parsing. Upstream has no test infrastructure; the
+  rig does not pretend to cover the pipeline itself. CI runs it between
+  typecheck and lint.
+
+

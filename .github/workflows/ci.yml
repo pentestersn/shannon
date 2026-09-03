@@ -38,6 +38,9 @@ jobs:
       - name: Typecheck
         run: pnpm check
 
+      - name: Test (vitest)
+        run: pnpm test
+
       - name: Lint (Biome)
         run: pnpm biome
 

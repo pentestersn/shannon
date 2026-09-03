@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Keygraph, Inc.
+// Copyright (C) 2026 Corvus contributors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License version 3
@@ -369,6 +370,17 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
       'ConfigurationError',
     );
   }
+  // Fork modification (Corvus): DAST runs have no source repository, so every SAST input is
+  // unusable there by construction — Capella would analyze an empty directory and a supplied
+  // SARIF would reference code this scan can neither read nor verify. Refuse both up front
+  // rather than spend a run discovering the emptiness.
+  const targetMode = input.targetMode ?? 'deep';
+  if (targetMode === 'dast' && (input.agenticSast !== undefined || input.sastSarif !== undefined)) {
+    throw ApplicationFailure.nonRetryable(
+      'Agentic SAST cannot run in DAST mode: no source repository was supplied. Remove the agentic_sast block and any supplied SAST report from your config, or re-run with --repo.',
+      'ConfigurationError',
+    );
+  }
   if (input.customerOutputPath !== undefined && input.customerOutputPath !== '/app/output') {
     throw ApplicationFailure.nonRetryable(
       'The customer output mount must use the stable worker path.',
@@ -456,6 +468,7 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
     ...(input.deliverablesSubdir !== undefined && { deliverablesSubdir: input.deliverablesSubdir }),
     ...(input.auditDir !== undefined && { auditDir: input.auditDir }),
     ...(input.promptDir !== undefined && { promptDir: input.promptDir }),
+    ...(input.targetMode !== undefined && { targetMode: input.targetMode }),
   };
 
   let resumeState: ResumeState | null = null;
@@ -653,6 +666,9 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
           ...baseInput,
           producerRef: prepared.ref,
           supplementalRef: enriched.ref,
+          // Fork modification (Corvus): DAST runs group observations under the black-box
+          // task-formation policy rather than the white-box one that reads jailed source.
+          ...(input.targetMode !== undefined && { targetMode: input.targetMode }),
         });
         addReconciliationMetrics(vulnerabilityClass, 'form', formation.metrics);
       } catch (error) {
@@ -1361,7 +1377,15 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
       // reconciliation, so preliminary analysis and reconnaissance never wait on it.
       const settlement = settleCapella();
       capellaSettlement = settlement;
-      await runSequentialPhase('pre-recon', 'pre-recon', a.runPreReconAgent);
+      // Fork modification (Corvus): in DAST mode there is no source to analyze, so the
+      // pre-recon code-analysis agent is skipped rather than run against an empty directory.
+      // markSkipped keeps it in the expected-agent contract (durable state and the summary
+      // count completion as completed ∪ skipped) without claiming it ever ran.
+      if (targetMode === 'deep') {
+        await runSequentialPhase('pre-recon', 'pre-recon', a.runPreReconAgent);
+      } else {
+        markSkipped('pre-recon');
+      }
       await runSequentialPhase('recon', 'recon', a.runReconAgent);
 
       state.currentPhase = 'vulnerability-exploitation';

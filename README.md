@@ -19,9 +19,9 @@
 > test.
 >
 > **Fork modifications** (see [FORK.md](FORK.md) for the complete, current list):
-> CI for the fork itself; then, as they land: a DAST/remote-only scan mode,
-> per-stage model routing, a hard spend cap, and an optional governed-egress
-> mode for proxy-enforced deployments.
+> CI for the fork itself; a DAST/remote-only scan mode (`shannon start -u <url>`
+> without `-r`); then, as they land: per-stage model routing, a hard spend cap,
+> and an optional governed-egress mode for proxy-enforced deployments.
 
 > [!NOTE]
 > **[Shannon 3.0 is live](https://github.com/KeygraphHQ/shannon/discussions/439):** deeper security code analysis, more thoroughly vetted findings, a rebuilt CLI, native CI/CD, professional PDF reports, and SARIF.
@@ -177,6 +177,12 @@ npx @keygraph/shannon@latest start \
 ```
 
 Shannon pulls the worker image from Docker Hub, starts the required local infrastructure, mounts the target repository read-only inside an ephemeral worker container, and writes results to a local workspace.
+
+> [!NOTE]
+> **Fork addition:** `-r/--repo` is optional in this fork. Without it, the scan
+> runs in DAST (remote-only) mode — black-box analysis and exploitation against
+> the live target only, with the five class lanes intact and no source-analysis
+> phase. See [FORK.md](FORK.md) §3.
 
 For source builds, authenticated scans, provider-specific setup, and platform notes, see [Documentation](#documentation).
 
