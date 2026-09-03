@@ -69,5 +69,11 @@ runs another Temporal deployment:
   as root/sudo for deployments where a root service (a container-hosted
   worker) spawns it. Upstream's refusal — bind-mounted files come back owned
   by root — stays the default, and the trade-off is the operator's.
-- `.env.example`: documents both additions.
+- `apps/cli/src/docker.ts`: container queries use the `{{.Label "k"}}`
+  template accessor instead of `{{ index .Labels "k" }}`. Docker 29's
+  `docker ps` template context exposes `.Labels` as a slice, so upstream's
+  `index` form errors on every query (`stop`, `stop --all`, and the
+  workspace-resolution fallbacks all failed as "Could not inspect running
+  scan workers"). Verified live: `stop --all` works against this engine now.
+- `.env.example`: documents both env additions.
 

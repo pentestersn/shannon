@@ -571,7 +571,11 @@ export function runningScanContainersChecked(
   filter: readonly string[] = WORKER_FILTER,
 ): CommandQueryResult<RunningScanContainer[]> {
   try {
-    const format = `{{.ID}}\t{{ index .Labels "${WORKSPACE_LABEL}" }}\t{{ index .Labels "${TASK_QUEUE_LABEL}" }}\t{{ index .Labels "${WORKFLOW_ID_LABEL}" }}\t{{ index .Labels "${WORKER_PROTOCOL_LABEL}" }}`;
+    // Fork modification (Corvus): Docker 29's `docker ps` template context exposes
+    // .Labels as a slice, so `index .Labels "k"` errors ("cannot index slice/array
+    // with type string") and every container query failed as `unavailable`. The
+    // `.Label "k"` accessor resolves one label directly and works on this engine.
+    const format = `{{.ID}}\t{{.Label "${WORKSPACE_LABEL}"}}\t{{.Label "${TASK_QUEUE_LABEL}"}}\t{{.Label "${WORKFLOW_ID_LABEL}"}}\t{{.Label "${WORKER_PROTOCOL_LABEL}"}}`;
     const output = execFileSync('docker', ['ps', ...filter, '--format', format], {
       stdio: 'pipe',
       encoding: 'utf-8',
