@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Keygraph, Inc.
+// Copyright (C) 2026 Corvus contributors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License version 3
@@ -46,6 +47,15 @@ export class TraceEmitter {
     this.pending.delete(toolCallId);
     const outcome = decideToolOutcome(call.tool, isError, this.now() - call.startedAt, call.count?.());
     if (outcome !== undefined) this.enqueue(() => WorkflowLogger.logToolOutcome(this.logPath, this.actor, outcome));
+  }
+
+  /**
+   * Record which model this agent attempt runs on (fork: per-stage routing) — one
+   * line per attempt, before any turn. Sub-agents inherit the parent's selection,
+   * so the parent's line covers them.
+   */
+  modelSelection(modelSpec: string): void {
+    this.enqueue(() => WorkflowLogger.logModelSelection(this.logPath, this.actor, modelSpec));
   }
 
   /** Queue and await delegation on the parent emitter before a child session can start. */

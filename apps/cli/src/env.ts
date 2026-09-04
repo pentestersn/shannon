@@ -14,6 +14,7 @@ import { getMode } from './mode.js';
 import {
   CURATED_PROVIDERS,
   type CuratedProviderId,
+  collectStageModelSpecs,
   GENERIC_API_KEY_ENV,
   isCuratedProvider,
   PROVIDER_API_KEY_ENV,
@@ -44,6 +45,22 @@ const COMMON_FORWARD_VARS = [
 ] as const;
 
 /**
+ * Fork modification (Corvus): stage-scoped model routing. Every well-formed
+ * stage override is forwarded by pattern — there are more stages than anyone
+ * wants to list, and an unset one must never appear in the container. Only
+ * upper-case stage names match; validateCredentials rejects anything else up
+ * front, so a near-miss variable can never slip into a scan silently.
+ */
+const STAGE_MODEL_VAR = /^SHANNON_AI_MODEL_[A-Z0-9_]+$/;
+const STAGE_MAX_TOKENS_VAR = /^SHANNON_AI_MAX_TOKENS_[A-Z0-9_]+$/;
+
+function stageForwardVars(): string[] {
+  return Object.keys(process.env)
+    .filter((key) => STAGE_MODEL_VAR.test(key) || STAGE_MAX_TOKENS_VAR.test(key))
+    .sort();
+}
+
+/**
  * Credential variables for one provider. Only the selected provider's entries are
  * forwarded, so a key for an unused provider never enters the scan container. An
  * uncurated provider has none — it relies on the common SHANNON_AI_API_KEY.
@@ -51,6 +68,23 @@ const COMMON_FORWARD_VARS = [
 function providerForwardVars(providerId: string): readonly string[] {
   if (!isCuratedProvider(providerId)) return [];
   return [...PROVIDER_API_KEY_ENV[providerId], ...PROVIDER_EXTRA_ENV[providerId]];
+}
+
+/**
+ * Providers whose credentials the scan container needs: the run-wide model's
+ * plus every stage override's (fork — a stage may run on another provider).
+ * An unparseable selection contributes nothing here; validateCredentials has
+ * already rejected it before Docker work begins.
+ */
+function scanProviders(): string[] {
+  const providers = new Set<string>();
+  const spec = resolveModelSpec();
+  if (typeof spec !== 'string') providers.add(spec.providerId);
+  const stageEntries = collectStageModelSpecs();
+  if (Array.isArray(stageEntries)) {
+    for (const entry of stageEntries) providers.add(entry.spec.providerId);
+  }
+  return [...providers];
 }
 
 /** Parse a user-facing boolean env var: `1`/`true` (any case) true, `0`/`false`/empty false, else the default. */
@@ -96,17 +130,17 @@ export function loadEnv(): void {
 }
 
 /**
- * Build `-e` flags for docker run. Forwards the common vars plus only the
- * selected provider's credentials, passed by name (`-e KEY`) so secret values
+ * Build `-e` flags for docker run. Forwards the common vars plus the
+ * credentials of every provider the scan will use (the run-wide model's plus
+ * each stage override's — fork), passed by name (`-e KEY`) so secret values
  * stay out of the `docker run` argv; docker inherits them from this process's env.
  */
 export function buildEnvFlags(): string[] {
   const flags: string[] = ['-e', 'TEMPORAL_ADDRESS=shannon-temporal:7233'];
 
-  const spec = resolveModelSpec();
-  const providerVars = typeof spec === 'string' ? [] : providerForwardVars(spec.providerId);
+  const providerVars = scanProviders().flatMap((providerId) => providerForwardVars(providerId));
 
-  for (const key of [...COMMON_FORWARD_VARS, ...providerVars]) {
+  for (const key of [...COMMON_FORWARD_VARS, ...providerVars, ...stageForwardVars()]) {
     if (process.env[key]) {
       flags.push('-e', key);
     }
@@ -159,15 +193,17 @@ function modelExplicitlySelected(): boolean {
  * Explain why the selected provider has no usable credential. With no model chosen
  * the provider is only the default (anthropic), so the real state is "nothing
  * configured" — or, if another provider's key is set, an unselected model.
+ * `source` names the variable that picked the provider (fork: a stage override).
  */
-function describeMissingCredential(providerId: string): string {
-  if (modelExplicitlySelected()) {
+function describeMissingCredential(providerId: string, source?: string): string {
+  if (source !== undefined || modelExplicitlySelected()) {
     const requirement = isCuratedProvider(providerId) ? PROVIDER_CREDENTIAL_HINT[providerId] : GENERIC_API_KEY_ENV;
     const hint =
       getMode() === 'local'
         ? `Set ${requirement} in .env or export it.`
         : `Export the variables or run 'npx @keygraph/shannon setup'.`;
-    return `No credentials found for provider "${providerId}". ${hint}`;
+    const origin = source !== undefined ? ` (selected by ${source})` : '';
+    return `No credentials found for provider "${providerId}"${origin}. ${hint}`;
   }
 
   const [provider] = configuredProviders();
@@ -193,6 +229,15 @@ export function validateCredentials(): CredentialValidation {
     return { valid: false, error: spec };
   }
 
+  // 1b. Fork: every stage-scoped override must parse too. The worker re-checks at
+  //     preflight, but by then a container is already up; a typo'd or malformed
+  //     SHANNON_AI_MODEL_<STAGE> fails here instead, before any Docker work. This
+  //     needs no credentials, so it also runs under pi-auth.
+  const stageEntries = collectStageModelSpecs();
+  if (typeof stageEntries === 'string') {
+    return { valid: false, error: stageEntries };
+  }
+
   // Pi-auth: skip the API-key checks, but the host auth file must exist to mount.
   if (piAuthFlagEnabled()) {
     const authPath = resolveHostPiAuthPath();
@@ -210,16 +255,28 @@ export function validateCredentials(): CredentialValidation {
     return { valid: false, error: describeMissingCredential(spec.providerId) };
   }
 
-  // 3. Exactly one provider may be configured. Several complete credentials make
-  //    the scan's provider depend on SHANNON_AI_MODEL alone, which is too easy to
-  //    misread as "both are in play" and too easy to redirect by editing one line.
+  // 2b. Fork: each stage override's provider needs a credential too — same rule
+  //     as the base: the named provider's own key, or the generic one.
+  for (const entry of stageEntries) {
+    if (!hasCredential(entry.spec.providerId)) {
+      return { valid: false, error: describeMissingCredential(entry.spec.providerId, entry.key) };
+    }
+  }
+
+  // 3. A configured provider nothing selects is ambiguous. Upstream allowed exactly
+  //    one provider because a second complete credential made the run's provider
+  //    depend on SHANNON_AI_MODEL alone — too easy to misread as "both are in play".
+  //    The fork's stage routing makes a second provider legitimate when a
+  //    SHANNON_AI_MODEL_<STAGE> override names it; one no model variable references
+  //    is still the ambiguity upstream rejected.
   const configured = configuredProviders();
-  if (configured.length > 1) {
+  const selectedProviders = new Set<string>([spec.providerId, ...stageEntries.map((entry) => entry.spec.providerId)]);
+  const unreferenced = configured.filter((id) => !selectedProviders.has(id));
+  if (configured.length > 1 && unreferenced.length > 0) {
     const setKeys = (id: CuratedProviderId): string[] =>
       PROVIDER_API_KEY_ENV[id].filter((name) => Boolean(process.env[name]));
     const list = configured.map((id) => `${id} (${setKeys(id).join(', ')})`).join(' and ');
-    const others = configured.filter((id) => id !== spec.providerId);
-    const extraVars = others.flatMap(setKeys);
+    const extraVars = unreferenced.flatMap(setKeys);
 
     const dropHint =
       getMode() === 'local'
@@ -229,8 +286,8 @@ export function validateCredentials(): CredentialValidation {
     const lines = [`Credentials for more than one provider are set: ${list}.`];
     if (extraVars.length > 0) {
       lines.push(
-        `Shannon runs one provider per scan, selected by SHANNON_AI_MODEL ("${spec.providerId}:...").`,
-        `Keep ${spec.providerId} and drop the rest — ${dropHint}`,
+        `Shannon runs the providers its model variables select: SHANNON_AI_MODEL ("${spec.providerId}:...") plus any SHANNON_AI_MODEL_<STAGE> override.`,
+        `Nothing selects ${unreferenced.join(', ')} — ${dropHint}`,
         `  unset ${extraVars.join(' ')}`,
       );
     }

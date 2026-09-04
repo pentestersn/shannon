@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Keygraph, Inc.
+// Copyright (C) 2026 Corvus contributors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License version 3
@@ -17,27 +18,35 @@ export interface ModelHost {
   classify(error: unknown, contextWindow?: number): ProviderFailure;
 }
 
-export type ModelSelectionResolver = () => Promise<ModelSelection>;
+export type ModelSelectionResolver = (stage?: string) => Promise<ModelSelection>;
 
 class ShannonModelHost implements ModelHost {
-  private selection: Promise<ModelSelection> | undefined;
+  /**
+   * One cached selection per role. Upstream cached a single selection because
+   * every role resolved the same run-wide model; the fork's per-stage routing
+   * (SHANNON_AI_MODEL_SMALL/MEDIUM/LARGE) lets roles differ, so the cache is
+   * keyed by role — otherwise the first role to resolve would decide the model
+   * for the others. Each entry clears itself on rejection so a retried activity
+   * can resolve again instead of replaying the first failure forever; the
+   * identity guard leaves a newer in-flight selection in place if one already
+   * replaced this one.
+   */
+  private readonly selections = new Map<ModelRole, Promise<ModelSelection>>();
 
   constructor(private readonly resolver: ModelSelectionResolver) {}
 
-  // Cache only a selection that resolves. The catch clears the slot on rejection so a later
-  // attempt (a retried activity) can resolve again instead of replaying the first failure forever.
-  // The identity guard leaves a newer in-flight selection in place if one already replaced this one.
-  resolve(_role: ModelRole): Promise<ModelSelection> {
-    if (this.selection) return this.selection;
+  resolve(role: ModelRole): Promise<ModelSelection> {
+    const cached = this.selections.get(role);
+    if (cached) return cached;
 
     const selection = Promise.resolve()
-      .then(() => this.resolver())
+      .then(() => this.resolver(role))
       .catch((error: unknown) => {
-        if (this.selection === selection) this.selection = undefined;
+        if (this.selections.get(role) === selection) this.selections.delete(role);
         throw error;
       });
-    this.selection = selection;
-    return this.selection;
+    this.selections.set(role, selection);
+    return selection;
   }
 
   classify(error: unknown, contextWindow?: number): ProviderFailure {

@@ -199,16 +199,114 @@ Verified on the wire against OpenRouter serving `z-ai/glm-5.3`:
 `max_output_tokens: 32768` and a recon agent completing 28 turns with real
 tool calls where the pre-fix run emitted 16 tokens and stopped.
 
-Honest caveat found while proving it: **`SHANNON_AI_OPENAI_FORMAT` is honored
-only on Pi's direct pi-ai path, not on the agent path** this engine uses.
-The descriptor correctly carries `api: "openai-completions"` for a
-`chat-completions` gateway, but Pi's `ModelRuntime` serves every
-`openai`-provider model through its single registered API (Responses):
-pi-ai's `createProvider` ignores per-model `api` there. In practice
-OpenRouter's `/responses` endpoint translates to the model's native dialect
-and the verified run above went through it — tool calls included — so the
-format setting is currently cosmetic for OpenAI-provider gateway runs.
-Making it authoritative is É4 work (Pi's `models.json` provider-level `api`
-override is the native mechanism).
+Honest caveat found while proving it, **since resolved** (see §5):
+`SHANNON_AI_OPENAI_FORMAT` used to be honored only on Pi's direct pi-ai
+path, not on the agent path this engine uses. Root cause, established by
+probing the real built worker against a mock gateway: when no models.json
+overlay and no extension exists for a provider, Pi's `ModelRuntime` installs
+the builtin provider **untouched**, whose single stream implementation
+serves the Responses API for every `openai` model — the descriptor's
+`api: "openai-completions"` is carried but never consulted. With an overlay
+present, `composeModelProvider`'s dispatch honors per-model `api` (a
+completions-tagged model with no completions-tagged builtin falls through
+to pi-ai's registered `openai-completions` implementation, the real
+chat-completions wire). Verified on the wire: the same run reaches
+`POST /v1/chat/completions` with the overlay and `POST /v1/responses`
+without it. The fork now writes that overlay itself (§5); the format
+variable is authoritative for chat-completions gateway runs.
+
+## 5 — Per-stage model routing and output budgets
+
+Upstream runs the whole pipeline on one model
+(`SHANNON_AI_MODEL=<provider>:<model-id>`). Real scans want a chain: a cheap
+fast model for recon, a strong one for exploitation, a mid one for report
+writing. This fork adds stage-scoped overrides — and, while making the
+format variable authoritative (below), the models.json mechanism that keeps
+gateway runs on the right wire.
+
+- **Routing chain** (`apps/worker/src/ai/models.ts`):
+  `SHANNON_AI_MODEL_<STAGE>` → `SHANNON_AI_MODEL` → fork default. A *stage*
+  is an agent name (`recon`, `injection-vuln`, `xss-vuln`, `auth-vuln`,
+  `authz-vuln`, `ssrf-vuln`, `injection-exploit`, `xss-exploit`,
+  `auth-exploit`, `ssrf-exploit`, `authz-exploit`, `miscellaneous-exploit`,
+  `report`, `pre-recon`, `validate-authentication`) or a model role
+  (`small`/`medium`/`large` — the structured-generation, task-formation,
+  and Capella seams that select by role rather than by agent). The suffix
+  is the stage name upper-cased with non-alphanumeric runs folded to `_`
+  (`injection-vuln` → `SHANNON_AI_MODEL_INJECTION_VULN`). The seam is the
+  one pi-executor already had: it now passes the agent's name to
+  `resolveModelSelection(stage)`. Sub-agents (`task` tool) inherit their
+  parent's selection, as upstream.
+- **Per-stage output budgets:** `SHANNON_AI_MAX_TOKENS_<STAGE>` caps the
+  output headroom one stage asks for (cheap stages capped, reasoning-heavy
+  stages widened) without touching other stages. It replaces the
+  descriptor's advertised ceiling for that stage only; the serving endpoint
+  still enforces the model's real limit and Pi still clamps to the context
+  window.
+- **Fail-loud near-miss rule:** a `SHANNON_AI_MODEL_<...>` variable carrying
+  a value must parse (`<provider>:<model-id>`, the offending key named in
+  the error) and its suffix must be upper-case (`SHANNON_AI_MODEL_recon`
+  and `SHANNON_AI_MODEL_` both fail with guidance). A typo'd stage must
+  never quietly route nothing. Unknown stage *names* are permissive —
+  preflight warns against the known set (all agents plus
+  `validate-authentication` and the three roles) because a name this
+  version doesn't know may be real in a future one; preflight also resolves
+  **every** stage override against the registry before the credential
+  probe, so a wrong model id fails in seconds as a config error instead of
+  mid-pipeline as a retried agent failure.
+- **ModelHost cache is per role** (`apps/worker/src/ai/model-host.ts`):
+  upstream cached one selection process-wide because every role resolved the
+  same run-wide model; with role overrides in play the cache is keyed by
+  role, or the first role to resolve would decide for all. A rejected
+  selection clears its own entry so a retried activity resolves again.
+- **Gateway models.json materialization**
+  (`materializeGatewayModelsJson`): when the run (base or any stage) uses
+  the `openai` provider through a gateway in `chat-completions` format, the
+  worker writes Pi's `models.json` overlay — `<agent-dir>/models.json` —
+  declaring each such model with its `api`, the fork's gateway limits, and
+  the gateway `baseUrl`. This is the §4-caveat fix: the overlay switches
+  ModelRuntime from the builtin-untouched path to the composed path that
+  honors per-model `api`. Declaring the model also means resolution finds
+  it in the catalogue instead of borrowing a reference descriptor, and its
+  cost is honestly zero rather than the reference's rates (a gateway id has
+  no catalogue-measured pricing; the serving provider's own usage figures
+  are the real source — per-model price overrides are future work). An
+  operator-written `models.json` is left untouched (their composition wins;
+  the format variable is then advisory); `responses` format and non-openai
+  runs are untouched (the builtin path already serves them faithfully);
+  the write is atomic (temp + rename) for concurrent lane activities. Scan
+  containers are fresh per scan, so "file exists ⇒ an operator wrote it"
+  holds in production.
+- **workflow.log routing record:** the log had no model field, so a run
+  with per-stage routing could not show which model a stage actually used.
+  Each agent attempt now emits one line before its first turn —
+  `[2026-09-04 12:00:00] [recon] model: openai:z-ai/glm-5.3` — in the
+  combined log and the agent's own file, with the same fail-closed safety
+  as other trace lines (a spec containing control characters or failing
+  the label charset is dropped, never written).
+- **CLI forwarding** (`apps/cli/src/env.ts`, `model-spec.ts`): every
+  well-formed `SHANNON_AI_MODEL_<STAGE>` / `SHANNON_AI_MAX_TOKENS_<STAGE>`
+  variable is forwarded into the scan container (by name, values stay out
+  of the `docker run` argv), the container receives credentials for the
+  union of providers the base and stage models select, and
+  `validateCredentials` parses every stage override before any Docker work.
+  The one-provider rule gained its stage-routing exception: a second
+  configured provider is legitimate when a stage override names it; one no
+  model variable references is still the ambiguity upstream rejected.
+- **Tests:** `apps/worker/tests/stage-model-routing.test.ts` — the fallback
+  chain, near-miss failures, stage budgets (cap, isolation, garbage), the
+  real-runtime routing of two distinct catalogue models, the per-role host
+  cache and its rejection clearing, the materialization document shape,
+  operator-file precedence, non-openai/responses/no-gateway skips, and the
+  `model:` trace line (recorded, fanned out, forged-spec dropped).
+- **Proved live** (2026-09-04, `--pipeline-testing` DAST run, 5m17s,
+  terminal `completed`): base `openai:z-ai/glm-5.3-flash`,
+  `SHANNON_AI_MODEL_RECON` and `SHANNON_AI_MODEL_REPORT` on
+  `openai:z-ai/glm-5.3`. workflow.log shows every stage on its routed
+  model (`[recon]`/`[report]` on glm-5.3, the five lanes on the flash
+  base), the scan container's materialized models.json declares both ids
+  with `api: openai-completions`, and the blessed report.json carries
+  `report_meta.model: z-ai/glm-5.3` — the routed model in the artifact
+  itself.
 
 

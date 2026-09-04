@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Keygraph, Inc.
+// Copyright (C) 2026 Corvus contributors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License version 3
@@ -7,7 +8,7 @@
 /**
  * Model selection and resolution for the pi harness.
  *
- * One model runs the entire workflow. Users name it with a single setting:
+ * One model runs the workflow by default. Users name it with a single setting:
  *
  *   SHANNON_AI_MODEL=<provider>:<model-id>
  *
@@ -16,6 +17,11 @@
  * because model IDs routinely contain slashes, and it is the *first* colon that
  * splits, because Bedrock model IDs contain colons of their own
  * (`amazon-bedrock:us.anthropic.claude-opus-4-5-20251101-v1:0`).
+ *
+ * Fork modification (Corvus): a stage may override the run-wide choice with
+ * SHANNON_AI_MODEL_<STAGE> (and SHANNON_AI_MAX_TOKENS_<STAGE> for its output
+ * budget). Stages are agent names and model roles; see the routing section
+ * below resolveModelSpec.
  *
  * Resolution returns a pi `Model` plus the `ModelRuntime` that owns its auth,
  * built over an in-memory credential store primed from the environment.
@@ -28,7 +34,7 @@
  * guard rails disagree with what the worker actually accepts at runtime.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Api, Credential, CredentialInfo, CredentialStore, Model } from '@earendil-works/pi-ai';
 import { getAgentDir, ModelRuntime } from '@earendil-works/pi-coding-agent';
@@ -191,6 +197,97 @@ export function parseModelSpec(spec: string): ModelSpec {
 /** Resolve the run's model from SHANNON_AI_MODEL, falling back to the default. */
 export function resolveModelSpec(): ModelSpec {
   return parseModelSpec(process.env.SHANNON_AI_MODEL || DEFAULT_MODEL_SPEC);
+}
+
+// ---------------------------------------------------------------------------
+// Fork modification (Corvus): per-stage model routing and output budgets.
+//
+// Upstream runs one model for the whole workflow. The fork lets an operator
+// route a different model per stage: SHANNON_AI_MODEL_<STAGE> overrides
+// SHANNON_AI_MODEL for that stage alone. A stage is an agent name
+// (`recon`, `injection-vuln`, `report`, `validate-authentication`, …) or a
+// model-role name (`small`, `medium`, `large` — the ModelHost seam shared by
+// task formation and Capella). The env suffix is the stage uppercased with
+// runs of non-alphanumerics collapsed to `_`, so `injection-vuln` reads
+// SHANNON_AI_MODEL_INJECTION_VULN. Sub-agents (`task` tool) inherit their
+// parent's model, as upstream.
+//
+// Output budgets follow the same shape: SHANNON_AI_MAX_TOKENS_<STAGE> replaces
+// the advertised output ceiling for that stage's model descriptor.
+// ---------------------------------------------------------------------------
+
+/** Prefix of every stage-scoped model env var (`SHANNON_AI_MODEL_<STAGE>`). */
+export const STAGE_MODEL_ENV_PREFIX = 'SHANNON_AI_MODEL_';
+
+/** Prefix of every stage-scoped output-budget env var (`SHANNON_AI_MAX_TOKENS_<STAGE>`). */
+export const STAGE_MAX_TOKENS_ENV_PREFIX = 'SHANNON_AI_MAX_TOKENS_';
+
+/** Suffix a stage contributes to its env vars: uppercased, non-alphanumerics collapsed to `_`. */
+export function stageEnvSuffix(stage: string): string {
+  return stage.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+}
+
+/** Env var carrying a stage's model override. */
+export function stageModelEnvName(stage: string): string {
+  return `${STAGE_MODEL_ENV_PREFIX}${stageEnvSuffix(stage)}`;
+}
+
+/** Env var carrying a stage's output-budget override. */
+export function stageMaxTokensEnvName(stage: string): string {
+  return `${STAGE_MAX_TOKENS_ENV_PREFIX}${stageEnvSuffix(stage)}`;
+}
+
+/**
+ * Every stage-scoped model var the environment carries, as `{ key, stage, spec }`
+ * in sorted key order. Keys under the fork's SHANNON_AI_MODEL_ namespace that do
+ * not match the `_<UPPER_SNAKE>` shape fail loud rather than being silently
+ * ignored — a near-miss variable (a typo'd stage) must never quietly route
+ * nothing. The stage string is the uppercase suffix; whether a stage actually
+ * exists is judged by the caller (preflight warns about unknown names).
+ */
+export function collectStageModelSpecs(): ReadonlyArray<{
+  readonly key: string;
+  readonly stage: string;
+  readonly spec: ModelSpec;
+}> {
+  const entries: { key: string; stage: string; spec: ModelSpec }[] = [];
+  for (const key of Object.keys(process.env)) {
+    if (!key.startsWith(STAGE_MODEL_ENV_PREFIX)) continue;
+    const value = process.env[key];
+    // An empty value means "unset" everywhere else in the chain, so only then is
+    // a variable ignored; one that carries a value must name a valid stage.
+    if (value === undefined || !value.trim()) continue;
+    const suffix = key.slice(STAGE_MODEL_ENV_PREFIX.length);
+
+    if (!/^[A-Z0-9_]+$/.test(suffix)) {
+      throw new Error(
+        `${key} is not a valid stage model variable. Use ${STAGE_MODEL_ENV_PREFIX}<STAGE> with an ` +
+          `upper-case stage name, e.g. ${STAGE_MODEL_ENV_PREFIX}INJECTION_VULN. Stages are agent names ` +
+          `(\`recon\`, \`injection-vuln\`, \`report\`, …) or model roles (\`small\`, \`medium\`, \`large\`).`,
+      );
+    }
+    // The parser's own message blames SHANNON_AI_MODEL; re-throw naming this key so
+    // the operator fixes the variable that is actually wrong.
+    try {
+      entries.push({ key, stage: suffix, spec: parseModelSpec(value) });
+    } catch (error) {
+      throw new Error(`${key}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  entries.sort((a, b) => a.key.localeCompare(b.key));
+  return entries;
+}
+
+/**
+ * The model spec one stage runs on: its SHANNON_AI_MODEL_<STAGE> override when
+ * set, otherwise the run-wide SHANNON_AI_MODEL (or the fork default).
+ */
+export function resolveStageModelSpec(stage: string | undefined): ModelSpec {
+  if (stage !== undefined) {
+    const raw = process.env[stageModelEnvName(stage)]?.trim();
+    if (raw) return parseModelSpec(raw);
+  }
+  return resolveModelSpec();
 }
 
 export interface ProviderCredentials {
@@ -393,22 +490,105 @@ export function resolveGatewayFormat(providerId: string, baseUrl: string | undef
 }
 
 /**
- * Resolve SHANNON_AI_MODEL, build a ModelRuntime primed with the provider's
- * credential, and look the model up in it.
+ * Where pi reads its provider/model overlay from: the agent dir's models.json.
  */
-export async function resolveModelSelection(): Promise<ModelSelection> {
-  const { providerId, modelId } = resolveModelSpec();
+export function gatewayModelsJsonPath(): string {
+  return path.join(getAgentDir(), 'models.json');
+}
+
+/**
+ * Fork modification (Corvus): make SHANNON_AI_OPENAI_FORMAT authoritative on the
+ * ModelRuntime path by declaring the run's gateway models in pi's models.json.
+ *
+ * Why: without an overlay for a provider, pi's ModelRuntime uses the builtin
+ * provider untouched, whose one stream implementation serves the Responses API
+ * for every openai model — the descriptor's `api: "openai-completions"` is
+ * carried but never consulted, so a chat-completions gateway is silently called
+ * over /responses. With an overlay pi composes the provider, and its dispatch
+ * honors the model's `api` (a `openai-completions` model with no
+ * completions-tagged builtin falls through to the registered completions API).
+ * Declaring the model also puts it in the catalogue, so resolution stops
+ * borrowing a reference descriptor and the entry carries the fork's gateway
+ * limits directly. Verified on the wire: the same run reaches /chat/completions
+ * with the overlay and /responses without it.
+ *
+ * Scope: only an OpenAI provider behind a gateway in chat-completions format
+ * needs this — the responses format is served faithfully by the builtin path,
+ * and every other provider has exactly one API. An existing models.json is left
+ * untouched: an operator who wrote one owns the composition (their entry wins,
+ * and the format variable is then advisory). Cost on a declared entry is zero —
+ * a gateway id has no measured pricing; the serving provider's own usage
+ * figures are the honest source until per-run price overrides exist.
+ *
+ * The write is atomic (temp file + rename) so parallel lane activities that
+ * resolve models concurrently can never read a half-written file, and identical
+ * concurrent writes are last-wins with the same content.
+ */
+export function materializeGatewayModelsJson(target: string = gatewayModelsJsonPath()): string | undefined {
+  const openAiSpecs = [resolveModelSpec(), ...collectStageModelSpecs().map((entry) => entry.spec)]
+    .filter((spec) => spec.providerId === 'openai')
+    .filter((spec, index, all) => all.findIndex((other) => other.modelId === spec.modelId) === index);
+  if (openAiSpecs.length === 0) return undefined;
+
+  const baseUrl = resolveProviderCredentials('openai').baseUrl;
+  if (!baseUrl) return undefined;
+
+  const format = resolveGatewayFormat('openai', baseUrl);
+  if (format !== 'chat-completions') return undefined;
+
+  if (existsSync(target)) return undefined;
+
+  const limits = resolveGatewayLimits();
+  const document = {
+    providers: {
+      openai: {
+        baseUrl,
+        models: openAiSpecs.map((spec) => ({
+          id: spec.modelId,
+          api: OPENAI_FORMATS['chat-completions'],
+          contextWindow: limits.contextWindow,
+          maxTokens: limits.maxTokens,
+        })),
+      },
+    },
+  };
+
+  mkdirSync(path.dirname(target), { recursive: true });
+  const temporary = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`);
+  renameSync(temporary, target);
+  return target;
+}
+
+/**
+ * Resolve the model one stage runs on, build a ModelRuntime primed with the
+ * provider's credential, and look the model up in it. `stage` is an agent name
+ * or model role; without one this is the run-wide selection.
+ */
+export async function resolveModelSelection(stage?: string): Promise<ModelSelection> {
+  const { providerId, modelId } = resolveStageModelSpec(stage);
   const credentials = resolveProviderCredentials(providerId);
   const format = resolveGatewayFormat(providerId, credentials.baseUrl);
+
+  materializeGatewayModelsJson();
 
   const mountedPiAuth = piAuthPresent();
   const modelRuntime = await createModelRuntime(providerId, credentials.apiKey);
 
-  const model = resolveModel(modelRuntime, providerId, modelId, credentials.baseUrl, format);
+  let model = resolveModel(modelRuntime, providerId, modelId, credentials.baseUrl, format);
   if (!model) {
     throw new Error(
       `Model not found in pi registry: provider="${providerId}" model="${modelId}". Browse valid providers and models at ${PI_CATALOG_URL}.`,
     );
+  }
+
+  // Stage output budget: replaces the descriptor's advertised ceiling. The
+  // serving endpoint still enforces the model's real limit, and pi still clamps
+  // the request to the context window — this only shapes the headroom an agent
+  // asks for (e.g. cap a cheap stage, widen a reasoning-heavy one).
+  const stageMaxTokens = stage !== undefined ? positiveIntEnv(stageMaxTokensEnvName(stage)) : undefined;
+  if (stageMaxTokens !== undefined) {
+    model = { ...model, maxTokens: stageMaxTokens };
   }
 
   let credentialSource: ModelSelection['credentialSource'] = 'ambient';

@@ -89,3 +89,70 @@ export function parseModelSpec(spec: string): ModelSpec | string {
 export function resolveModelSpec(): ModelSpec | string {
   return parseModelSpec(process.env.SHANNON_AI_MODEL || DEFAULT_MODEL_SPEC);
 }
+
+/**
+ * Stage-scoped model routing (fork). Mirrors apps/worker/src/ai/models.ts: the
+ * same prefixes, the same suffix rule, the same failure text — the worker's
+ * preflight re-validates everything, so the CLI's job is only to fail the same
+ * way, earlier (before any Docker work), and to forward the variables.
+ */
+export const STAGE_MODEL_ENV_PREFIX = 'SHANNON_AI_MODEL_';
+
+export const STAGE_MAX_TOKENS_ENV_PREFIX = 'SHANNON_AI_MAX_TOKENS_';
+
+export interface StageModelEntry {
+  readonly key: string;
+  readonly stage: string;
+  readonly spec: ModelSpec;
+}
+
+/** Normalize a stage name into its env suffix: `injection-vuln` -> `INJECTION_VULN`. Mirrors the worker. */
+export function stageEnvSuffix(stage: string): string {
+  return stage.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+}
+
+/** The env var selecting one stage's model. Mirrors the worker. */
+export function stageModelEnvName(stage: string): string {
+  return `${STAGE_MODEL_ENV_PREFIX}${stageEnvSuffix(stage)}`;
+}
+
+/** The env var capping one stage's output tokens. Mirrors the worker. */
+export function stageMaxTokensEnvName(stage: string): string {
+  return `${STAGE_MAX_TOKENS_ENV_PREFIX}${stageEnvSuffix(stage)}`;
+}
+
+/**
+ * Collect every stage-scoped model override the environment carries, in sorted
+ * key order. Mirrors the worker's collectStageModelSpecs — including its
+ * fail-loud rule: a near-miss variable (lower-case, or a value without a
+ * provider) returns this error string instead of being silently ignored, so a
+ * typo'd stage can never quietly route nothing. The worker throws the same
+ * message at preflight; the CLI just surfaces it before Docker starts.
+ */
+export function collectStageModelSpecs(): StageModelEntry[] | string {
+  const entries: StageModelEntry[] = [];
+  const keys = Object.keys(process.env)
+    .filter((key) => key.startsWith(STAGE_MODEL_ENV_PREFIX))
+    .sort((a, b) => a.localeCompare(b));
+
+  for (const key of keys) {
+    const value = process.env[key];
+    // An empty value means "unset" everywhere else in the chain, so only then is
+    // a variable ignored; one that carries a value must name a valid stage.
+    if (value === undefined || !value.trim()) continue;
+    const suffix = key.slice(STAGE_MODEL_ENV_PREFIX.length);
+
+    if (!/^[A-Z0-9_]+$/.test(suffix)) {
+      return (
+        `${key} is not a valid stage model variable. Use ${STAGE_MODEL_ENV_PREFIX}<STAGE> with an ` +
+        `upper-case stage name, e.g. ${STAGE_MODEL_ENV_PREFIX}INJECTION_VULN. Stages are agent names ` +
+        `(\`recon\`, \`injection-vuln\`, \`report\`, …) or model roles (\`small\`, \`medium\`, \`large\`).`
+      );
+    }
+
+    const spec = parseModelSpec(value);
+    if (typeof spec === 'string') return `${key}: ${spec}`;
+    entries.push({ key, stage: suffix, spec });
+  }
+  return entries;
+}

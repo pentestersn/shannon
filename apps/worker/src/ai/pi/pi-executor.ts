@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Keygraph, Inc.
+// Copyright (C) 2026 Corvus contributors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License version 3
@@ -268,8 +269,10 @@ export async function runPiPrompt(
   if (deliverablesSubdir) process.env.SHANNON_DELIVERABLES_SUBDIR = deliverablesSubdir;
 
   // 4. Resolve model + auth, then assemble the tool set (universal task/todo tools
-  //    plus any caller-supplied collector/submit tools).
-  const selection = await resolveModelSelection();
+  //    plus any caller-supplied collector/submit tools). The agent's own name is the
+  //    routing stage (fork: SHANNON_AI_MODEL_<AGENT_NAME>), so each lane can run a
+  //    different model; sub-agents below inherit this selection.
+  const selection = await resolveModelSelection(agentName ?? undefined);
   const resourceLoader = await buildResourceLoader(sourceDir, logger, agentName);
   const agentNameCandidate = agentName ?? '';
   const parentAgentName = isLoggableAgentName(agentNameCandidate) ? agentNameCandidate : 'pre-recon';
@@ -279,6 +282,9 @@ export async function runPiPrompt(
   const traceEmitter = workflowLogPath
     ? new TraceEmitter(workflowLogPath, { kind: 'agent', agent: parentAgentName })
     : undefined;
+  // One routing record per agent attempt: which model this stage actually ran on.
+  // With per-stage routing the model differs by lane, so the durable trace names it.
+  traceEmitter?.modelSelection(`${selection.providerId}:${selection.model.id}`);
   // Accumulates usage from in-process `task` child sessions so the parent's reported
   // cost includes sub-agent spend (their getSessionStats is separate from ours).
   const childUsage: ChildUsage = { cost: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };

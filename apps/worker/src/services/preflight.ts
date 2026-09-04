@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Keygraph, Inc.
+// Copyright (C) 2026 Corvus contributors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License version 3
@@ -16,6 +17,7 @@
  * 2. Config file parses and validates (if provided)
  * 3. code_path rules match real entries in the repo (filesystem only)
  * 4. Credentials validate via a minimal pi session against the run's own model
+ *    (fork: every SHANNON_AI_MODEL_<STAGE> override must resolve too, before the probe)
  * 5. Target URL resolves, is not link-local (cloud metadata), and is reachable (DNS + HTTP)
  */
 
@@ -37,9 +39,11 @@ import {
 import { glob } from 'zx';
 import {
   type CuratedProviderId,
+  collectStageModelSpecs,
   createModelRuntime,
   GENERIC_API_KEY_ENV,
   type ModelSpec,
+  materializeGatewayModelsJson,
   type OpenAiFormat,
   PI_CATALOG_URL,
   piAuthPresent,
@@ -47,11 +51,13 @@ import {
   resolveModel,
   resolveModelSpec,
   resolveProviderCredentials,
+  stageEnvSuffix,
 } from '../ai/models.js';
 import { PI_RETRY_SETTINGS } from '../ai/pi/retry-settings.js';
 import { providerTurnError } from '../ai/pi/turn-error.js';
 import { parseConfig } from '../config-parser.js';
 import type { ActivityLogger } from '../types/activity-logger.js';
+import { ALL_AGENTS } from '../types/agents.js';
 import type { Config, Rule } from '../types/config.js';
 import { ErrorCode } from '../types/errors.js';
 import { err, isErr, ok, type Result } from '../types/result.js';
@@ -362,6 +368,36 @@ async function validateCredentials(logger: ActivityLogger): Promise<Result<void,
     );
   }
 
+  // Fork: read every stage-scoped model override now, so a malformed one fails
+  // before any scan work begins, and materialize the gateway models.json before
+  // the runtime below reads it (with the overlay in place the probe exercises
+  // the same API dialect the scan itself will use).
+  let stageSpecs: ReadonlyArray<{ readonly key: string; readonly stage: string; readonly spec: ModelSpec }>;
+  try {
+    stageSpecs = collectStageModelSpecs();
+    materializeGatewayModelsJson();
+  } catch (error) {
+    return err(
+      new PentestError(
+        error instanceof Error ? error.message : String(error),
+        'config',
+        false,
+        {},
+        ErrorCode.AUTH_FAILED,
+      ),
+    );
+  }
+  const knownStages = new Set(
+    [...ALL_AGENTS, 'validate-authentication', 'small', 'medium', 'large'].map(stageEnvSuffix),
+  );
+  for (const { key, stage } of stageSpecs) {
+    if (!knownStages.has(stage)) {
+      logger.warn(
+        `${key} does not match any known stage (agents like \`recon\`, \`injection-vuln\`, \`report\`, or roles \`small\`/\`medium\`/\`large\`); no agent will read it.`,
+      );
+    }
+  }
+
   // 4. Model must exist in the registry, for every provider — Bedrock IDs are the
   //    easiest to get wrong, since region prefixes and version suffixes differ per
   //    model (`us.anthropic.claude-opus-5` exists, bare `anthropic.` does not).
@@ -383,6 +419,50 @@ async function validateCredentials(logger: ActivityLogger): Promise<Result<void,
     logger.warn(
       `Model "${spec.modelId}" is not in the ${spec.providerId} catalogue; passing it to the custom endpoint as given. Cost figures will be approximate.`,
     );
+  }
+
+  // Fork: every stage override must resolve too. It runs mid-pipeline otherwise,
+  // as an agent failure with retries, instead of a named preflight error. Each
+  // stage may name its own provider; the same format/credential rules apply.
+  for (const { key, spec: stageModel } of stageSpecs) {
+    const stageCredentials = resolveProviderCredentials(stageModel.providerId);
+    let stageFormat: OpenAiFormat;
+    try {
+      stageFormat = resolveGatewayFormat(stageModel.providerId, stageCredentials.baseUrl);
+    } catch (error) {
+      return err(
+        new PentestError(
+          error instanceof Error ? error.message : String(error),
+          'config',
+          false,
+          { providerId: stageModel.providerId, modelId: stageModel.modelId, stage: key },
+          ErrorCode.AUTH_FAILED,
+        ),
+      );
+    }
+    const stageModelResolved = resolveModel(
+      modelRuntime,
+      stageModel.providerId,
+      stageModel.modelId,
+      stageCredentials.baseUrl,
+      stageFormat,
+    );
+    if (!stageModelResolved) {
+      return err(
+        new PentestError(
+          `Model not found in pi registry: provider="${stageModel.providerId}" model="${stageModel.modelId}" (stage override ${key}). Browse valid providers and models at ${PI_CATALOG_URL}.`,
+          'config',
+          false,
+          { providerId: stageModel.providerId, modelId: stageModel.modelId, stage: key },
+          ErrorCode.AUTH_FAILED,
+        ),
+      );
+    }
+    if (!modelRuntime.getModel(stageModel.providerId, stageModel.modelId)) {
+      logger.warn(
+        `Stage model "${stageModel.modelId}" (${key}) is not in the ${stageModel.providerId} catalogue; passing it to the custom endpoint as given. Cost figures will be approximate.`,
+      );
+    }
   }
   if (credentials.baseUrl && spec.providerId === 'openai') {
     logger.info(`Gateway API: ${format} (${baseModel.api})`);

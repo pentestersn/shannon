@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Keygraph, Inc.
+// Copyright (C) 2026 Corvus contributors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License version 3
@@ -24,6 +25,7 @@ import {
 import { LogStream, warnAgentLoggingFailure, warnLoggingFailure } from './log-stream.js';
 import { type OperationalStageTiming, summarizeOperationalMetrics } from './operational-summary.js';
 import {
+  containsControlCharacter,
   isLoggableAgentName,
   isWorkflowPhase,
   type LoggableAgentName,
@@ -127,6 +129,19 @@ function formatCostUsd(costUsd: number | null): string {
 /** Keep normal PI names readable and losslessly quote any unexpected name. */
 function formatToolName(tool: string): string {
   return /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(tool) ? tool : JSON.stringify(tool);
+}
+
+/**
+ * A `provider:model` routing label (fork: per-stage model selection). Provider and
+ * model ids are operator-named and may contain letters, digits, dots, colons, slashes,
+ * pluses, and dashes — control characters or anything outside that shape drops the
+ * whole line, the pre-existing fail-closed behavior for projected trace lines.
+ */
+function safeModelSpecLabel(modelSpec: string): string | undefined {
+  // containsControlCharacter is an indexed scan — a control-character regex literal is
+  // disallowed by lint.
+  if (containsControlCharacter(modelSpec)) return undefined;
+  return /^[A-Za-z0-9][A-Za-z0-9 ./:_+-]{0,119}$/u.test(modelSpec) ? modelSpec : undefined;
 }
 
 /** One self-describing first line per per-agent file, appended once when its lease opens. */
@@ -297,6 +312,21 @@ export class WorkflowLogger {
       workflowLogPath,
       { kind: 'agent', agent: parent },
       (prefix) => `[${WorkflowLogger.traceTimestamp()}] [${prefix}] task: started subagent "${identity}"`,
+    );
+  }
+
+  /**
+   * `[agent] model: openai:z-ai/glm-5.3` — the fork's per-stage routing record: which
+   * model one agent attempt actually runs on. Emitted once per attempt, before any
+   * turn, so a resumed or retried attempt re-records its (possibly different) model.
+   */
+  static async logModelSelection(workflowLogPath: string, actor: TraceActor, modelSpec: string): Promise<void> {
+    const safeModelSpec = safeModelSpecLabel(modelSpec);
+    if (safeModelSpec === undefined) return;
+    await WorkflowLogger.writeProjectedTraceLine(
+      workflowLogPath,
+      actor,
+      (prefix) => `[${WorkflowLogger.traceTimestamp()}] [${prefix}] model: ${safeModelSpec}`,
     );
   }
 
