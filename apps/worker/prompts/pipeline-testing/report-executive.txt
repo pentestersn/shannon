@@ -1,3 +1,5 @@
 @include(shared/_filesystem.txt)
 
+Run `set-report-meta --target "{{WEB_URL}}" --assessment-date "{{ASSESSMENT_DATE}}" --scope "pipeline testing" --executive-summary "Pipeline testing assessment of {{WEB_URL}} conducted on {{ASSESSMENT_DATE}}. This abbreviated pass exercises the pipeline stages; the findings section lists what the lanes queued."`.
+
 Read `.shannon/deliverables/comprehensive_security_assessment_report.md`, prepend "# Security Assessment Report\n\n**Target:** {{WEB_URL}}\n\n" to the content, and save it back. Say "Done".

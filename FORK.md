@@ -309,4 +309,25 @@ gateway runs on the right wire.
   `report_meta.model: z-ai/glm-5.3` — the routed model in the artifact
   itself.
 
+## 6 — Pipeline-testing report stub repair
+
+Found while proving §5 live. Upstream's
+`apps/worker/prompts/pipeline-testing/report-executive.txt` stub told the
+report agent only to prepend the title to the assembled markdown — it never
+instructed `set-report-meta`, so the canonical report carried an empty
+`executive_summary` and every fresh-workspace pipeline-testing run died at
+the finalization integrity wall (`finalization-report-meta-malformed`,
+report.json unblest, terminal `failed`). The failure was structural, not
+model-dependent: identical on `z-ai/glm-5.3-flash` and `z-ai/glm-5.3`,
+both following the stub to the letter. The stub now invokes
+`set-report-meta` with the prompt's own interpolations (`{{WEB_URL}}`,
+`{{ASSESSMENT_DATE}}`); the workflow keeps deterministic ownership of the
+date and the scope afterwards (`activities.ts` rewrites both when reading
+the meta back), so the stub's only real contribution is the non-empty
+summary. Prompt `.txt` files carry no license headers — their content is
+interpolated into model context — so this modification is inventoried
+here rather than in the file. Verified live: the same three-model
+pipeline-testing run now reaches terminal `completed` with a blessed
+report.json (§5's live bullet).
+
 
