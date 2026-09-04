@@ -31,6 +31,11 @@ const COMMON_FORWARD_VARS = [
   'SHANNON_AI_MODEL',
   'SHANNON_AI_BASE_URL',
   'SHANNON_AI_OPENAI_FORMAT',
+  // Fork modification (Corvus): gateway pass-through model limits. The worker's
+  // resolveGatewayLimits reads these; without forwarding they silently miss the
+  // container and a gateway id keeps its borrowed (possibly tiny) window.
+  'SHANNON_AI_CONTEXT_WINDOW',
+  'SHANNON_AI_MAX_TOKENS',
   // Opt-in debug flag: when set, the worker persists a bounded, sanitized snippet of a failed
   // provider turn's raw error message to error.log. Off by default; provider prose stays out of
   // durable state unless an operator deliberately enables it for a diagnosis.

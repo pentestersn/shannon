@@ -161,5 +161,54 @@ black-box mode for targets whose source is not available.
   `--mode`/optional-`-r` parsing. Upstream has no test infrastructure; the
   rig does not pretend to cover the pipeline itself. CI runs it between
   typecheck and lint.
+- **Verified end-to-end** against a deliberate local target (a throwaway
+  smoke server), through an OpenRouter gateway serving a model Pi's
+  catalogue does not know: recon passed, all five class lanes ran,
+  reconciliation/exploitation/reporting completed, and the engine
+  exploited a real, unplanted bug in the target — an unauthenticated
+  `GET //` that crashed the server process — reporting it as
+  `status: exploited` with full proof of impact. The same run exercised
+  the resume seam (7 completed agents skipped, the failed class retried,
+  reporting finished) and produced `report.json`/SARIF/PDF.
+
+## 4 — Gateway pass-through model limits
+
+A run through an OpenAI-compatible gateway names a model id the Pi catalogue
+never measured (`SHANNON_AI_MODEL=openai:<gateway-id>` +
+`SHANNON_AI_BASE_URL`). Pi's resolver serves such an id on a descriptor
+borrowed from the provider's first catalogue model — shape only. The borrow
+used to carry the reference's `contextWindow`/`maxTokens` too, and Pi clamps
+every request's output budget to `contextWindow − context − 4096`
+(pi-ai `clampMaxTokensToContext`), flooring Responses requests at 16 tokens.
+A gateway run whose reference carried an 8192-token window therefore asked
+the model for **16 output tokens on every turn**: the model died mid-sentence
+on turn one with no room for a tool call, every agent ended with empty text,
+and the pipeline failed output validation on every retry — with nothing on
+the wire to say so. This is the failure class the Corvus memory already
+calls the reasoning-model max_tokens trap.
+
+The fix (`apps/worker/src/ai/models.ts::resolveModel` pass-through branch):
+a gateway pass-through now advertises fork defaults
+(`SHANNON_AI_CONTEXT_WINDOW=200000`, `SHANNON_AI_MAX_TOKENS=32768`, env
+overridable, garbage rejected loudly). Rationale: a gateway id names a model
+the catalogue never measured; the serving endpoint enforces the real limit,
+so the fork advertises generous headroom and the clamp stops being the
+bottleneck. Catalogue models keep their own measured limits untouched, and
+`apps/cli/src/env.ts` forwards both variables into the scan container.
+Verified on the wire against OpenRouter serving `z-ai/glm-5.3`:
+`max_output_tokens: 32768` and a recon agent completing 28 turns with real
+tool calls where the pre-fix run emitted 16 tokens and stopped.
+
+Honest caveat found while proving it: **`SHANNON_AI_OPENAI_FORMAT` is honored
+only on Pi's direct pi-ai path, not on the agent path** this engine uses.
+The descriptor correctly carries `api: "openai-completions"` for a
+`chat-completions` gateway, but Pi's `ModelRuntime` serves every
+`openai`-provider model through its single registered API (Responses):
+pi-ai's `createProvider` ignores per-model `api` there. In practice
+OpenRouter's `/responses` endpoint translates to the model's native dialect
+and the verified run above went through it — tool calls included — so the
+format setting is currently cosmetic for OpenAI-provider gateway runs.
+Making it authoritative is É4 work (Pi's `models.json` provider-level `api`
+override is the native mechanism).
 
 

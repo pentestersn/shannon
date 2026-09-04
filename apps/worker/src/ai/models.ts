@@ -93,6 +93,49 @@ export type OpenAiFormat = keyof typeof OPENAI_FORMATS;
 /** Format assumed when a gateway is configured but no format is named. */
 export const DEFAULT_OPENAI_FORMAT: OpenAiFormat = 'chat-completions';
 
+/**
+ * Fork modification (Corvus): context window and output ceiling advertised for a
+ * gateway pass-through model — an id the catalogue does not know, described by
+ * borrowing a reference model's descriptor. The borrow gives an unseen id a
+ * shape; its window and ceiling are the reference's, and pi clamps every
+ * request's output budget to `contextWindow - context - 4096` (pi-ai
+ * `clampMaxTokensToContext`). A small borrowed window starves the agent: a
+ * gateway run whose reference carried an 8192-token window left 16 output
+ * tokens, so the model died mid-sentence on its first turn with no room for a
+ * tool call and the pipeline failed output validation on every retry. A gateway
+ * id names a model the catalogue never measured, so the fork advertises
+ * generous defaults — the serving endpoint enforces the real limit — with env
+ * overrides for operators whose gateway model has a genuinely small window.
+ */
+export const GATEWAY_CONTEXT_WINDOW_ENV = 'SHANNON_AI_CONTEXT_WINDOW';
+export const GATEWAY_MAX_TOKENS_ENV = 'SHANNON_AI_MAX_TOKENS';
+export const GATEWAY_DEFAULT_CONTEXT_WINDOW = 200_000;
+export const GATEWAY_DEFAULT_MAX_TOKENS = 32_768;
+
+export interface GatewayLimits {
+  readonly contextWindow: number;
+  readonly maxTokens: number;
+}
+
+/** Read a positive-integer env var. Unset is undefined; garbage fails loud. */
+function positiveIntEnv(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer, got "${raw}".`);
+  }
+  return value;
+}
+
+/** Limits a gateway pass-through model advertises, from env or the fork defaults. */
+export function resolveGatewayLimits(): GatewayLimits {
+  return {
+    contextWindow: positiveIntEnv(GATEWAY_CONTEXT_WINDOW_ENV) ?? GATEWAY_DEFAULT_CONTEXT_WINDOW,
+    maxTokens: positiveIntEnv(GATEWAY_MAX_TOKENS_ENV) ?? GATEWAY_DEFAULT_MAX_TOKENS,
+  };
+}
+
 function isOpenAiFormat(value: string): value is OpenAiFormat {
   return value in OPENAI_FORMATS;
 }
@@ -304,7 +347,23 @@ export function resolveModel(
   const reference = modelRuntime.getModels(providerId)[0];
   if (!reference) return undefined;
 
-  return pointAtGateway({ ...reference, id: modelId, name: modelId }, providerId, baseUrl, format);
+  // Fork modification (Corvus): the pass-through borrows the reference's shape
+  // but not its output headroom — the borrowed window feeds pi's output clamp
+  // and a small one starves the agent (see resolveGatewayLimits). Only ids the
+  // catalogue does not know land here; a known id carries its own measured limits.
+  const limits = resolveGatewayLimits();
+  return pointAtGateway(
+    {
+      ...reference,
+      id: modelId,
+      name: modelId,
+      contextWindow: limits.contextWindow,
+      maxTokens: limits.maxTokens,
+    },
+    providerId,
+    baseUrl,
+    format,
+  );
 }
 
 /**
