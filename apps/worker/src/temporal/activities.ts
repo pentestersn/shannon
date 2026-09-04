@@ -20,7 +20,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ApplicationFailure, Context, heartbeat } from '@temporalio/activity';
 import { syncPermissionSystemConfig } from '../ai/pi/permission-system.js';
-import { writePlaywrightStealthConfig } from '../ai/playwright-config-writer.js';
+import { governedProxyUrl, writePlaywrightStealthConfig } from '../ai/playwright-config-writer.js';
 import { AuditSession } from '../audit/index.js';
 import type { ResumeAttempt } from '../audit/metrics-tracker.js';
 import type { WorkflowPhase } from '../audit/safe-fields.js';
@@ -992,6 +992,12 @@ export async function initDeliverableGit(input: ActivityInput): Promise<void> {
 export async function syncPlaywrightStealthConfig(input: ActivityInput): Promise<void> {
   const logger = createActivityLogger();
   const { result, configPath } = await writePlaywrightStealthConfig(input.repoPath);
+  // Fork (Corvus): when egress is governed the browser config carries the
+  // enforcing proxy — say so in the run's journal so the posture is auditable.
+  const proxyUrl = governedProxyUrl();
+  if (proxyUrl !== undefined) {
+    logger.info(`Egress governed: browser traffic routes through ${proxyUrl} (fork)`);
+  }
   if (result === 'skipped-existing') {
     logger.info(`Playwright stealth config: leaving existing ${configPath} in place`);
   } else {

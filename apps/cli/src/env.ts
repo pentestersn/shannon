@@ -101,6 +101,46 @@ export function envBool(name: string, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
+// Fork modification (Corvus): governed egress. Setting SHANNON_PROXY_URL points
+// the whole scan at an enforcing forward proxy (the Corvus EnforcingProxy):
+// the browser launches with --proxy-server (worker playwright-config-writer),
+// env-honoring clients inherit HTTP_PROXY/HTTPS_PROXY with NO_PROXY emptied,
+// and /etc/hosts forwarding is disabled (docker.ts). Raw sockets remain the
+// documented residual breach — this governs every client that plays by the rules.
+export const EGRESS_PROXY_ENV = 'SHANNON_PROXY_URL';
+
+/** The run's enforcing proxy URL, or undefined when egress is ungoverned. */
+export function governedProxyUrl(): string | undefined {
+  const raw = process.env[EGRESS_PROXY_ENV]?.trim();
+  return raw === '' ? undefined : raw;
+}
+
+/**
+ * Validate the egress proxy URL: it must parse as an http(s) URL with a host.
+ * Runs before any Docker work (validateCredentials step 1d) — a typo'd URL
+ * would otherwise surface as a browser that can reach nothing mid-scan.
+ */
+function validateEgressProxyUrl(): string | undefined {
+  const raw = governedProxyUrl();
+  if (raw === undefined) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return `${EGRESS_PROXY_ENV} is set but "${raw}" does not parse as a URL. Set it to the proxy's http(s) URL, e.g. http://172.18.0.1:9400.`;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return `${EGRESS_PROXY_ENV} must be an http(s) URL, got protocol "${parsed.protocol}".`;
+  }
+  if (parsed.hash !== '' || parsed.search !== '') {
+    return `${EGRESS_PROXY_ENV} must be a bare proxy URL — no query or fragment.`;
+  }
+  if (parsed.hostname === '') {
+    return `${EGRESS_PROXY_ENV} is set but carries no host.`;
+  }
+  return undefined;
+}
+
 const USE_PI_AUTH_ENV = 'SHANNON_USE_PI_AUTH';
 
 /** Where the host's auth.json is mounted: pi's standard location (worker HOME is /tmp), read natively. */
@@ -140,6 +180,34 @@ export function loadEnv(): void {
  * each stage override's — fork), passed by name (`-e KEY`) so secret values
  * stay out of the `docker run` argv; docker inherits them from this process's env.
  */
+/**
+ * Fork modification (Corvus): the NO_PROXY allowlist for a governed run —
+ * exactly the infrastructure hosts, never the scan target. The Temporal
+ * control plane is always the compose service name the CLI forwards as
+ * TEMPORAL_ADDRESS (shannon-temporal:7233); its gRPC client reads the
+ * lowercase proxy variables, so without an exclusion the worker's own
+ * control plane gets gated by a scope proxy that only knows the scan
+ * target (found live). The LLM gateway host, when a gateway run names one
+ * (SHANNON_AI_BASE_URL), is infrastructure the same way — a scan never
+ * targets its own model gateway. Loopback inside the container is the
+ * container itself; a target URL never names it (the CLI rewrites loopback
+ * targets to the host gateway before the container sees them).
+ */
+function infraNoProxyList(): string {
+  const hosts = new Set(['localhost', '127.0.0.1', '::1', 'shannon-temporal']);
+  const baseUrl = process.env.SHANNON_AI_BASE_URL?.trim();
+  if (baseUrl !== undefined && baseUrl !== '') {
+    try {
+      const host = new URL(baseUrl).hostname;
+      if (host !== '') hosts.add(host);
+    } catch {
+      // An unparseable base URL contributes no exclusion — there is no
+      // hostname to exempt, and the proxy env governs everything else.
+    }
+  }
+  return [...hosts].join(',');
+}
+
 export function buildEnvFlags(): string[] {
   const flags: string[] = ['-e', 'TEMPORAL_ADDRESS=shannon-temporal:7233'];
 
@@ -149,6 +217,44 @@ export function buildEnvFlags(): string[] {
     if (process.env[key]) {
       flags.push('-e', key);
     }
+  }
+
+  // Fork modification (Corvus): governed egress — forward the proxy URL plus
+  // the conventional proxy variables. The values are set in this process's
+  // env and passed by name (`-e KEY`): a proxy URL may carry credentials and
+  // must not appear in the `docker run` argv.
+  //
+  // BOTH letter cases are set and forwarded: curl deliberately ignores
+  // uppercase HTTP_PROXY for plain-http URLs (a CGI safety carve-out) and
+  // reads only the lowercase spelling — found live when a scan's own curl
+  // bypassed the gate. The Temporal client is the same kind of reader (its
+  // gRPC stack reads lowercase too — also found live), which is exactly why
+  // NO_PROXY below names the infrastructure hosts and nothing else: the
+  // worker's control plane (shannon-temporal) and the LLM gateway are
+  // infrastructure, never the scan target, and a scope proxy that sees them
+  // must not gate them. Everything else in the container — the scan target
+  // first — stays governed: NO_PROXY is an allowlist of infrastructure, not
+  // an escape hatch, and it is never empty.
+  const proxyUrl = governedProxyUrl();
+  if (proxyUrl !== undefined) {
+    const noProxy = infraNoProxyList();
+    for (const key of ['HTTP_PROXY', 'http_proxy']) process.env[key] = proxyUrl;
+    for (const key of ['HTTPS_PROXY', 'https_proxy']) process.env[key] = proxyUrl;
+    process.env.NO_PROXY = noProxy;
+    process.env.no_proxy = noProxy;
+    flags.push(
+      '-e',
+      EGRESS_PROXY_ENV,
+      '-e',
+      'HTTP_PROXY',
+      '-e',
+      'http_proxy',
+      '-e',
+      'HTTPS_PROXY',
+      '-e',
+      'https_proxy',
+    );
+    flags.push('-e', `NO_PROXY=${noProxy}`, '-e', `no_proxy=${noProxy}`);
   }
 
   return flags;
@@ -249,6 +355,14 @@ export function validateCredentials(): CredentialValidation {
   const priceError = validateModelPriceVars();
   if (priceError !== undefined) {
     return { valid: false, error: priceError };
+  }
+
+  // 1d. Fork: a set egress proxy URL must parse as a bare http(s) URL — the
+  //     whole scan is pointed at it, so a typo fails here, before any Docker
+  //     work, not as a browser that can reach nothing mid-scan.
+  const proxyError = validateEgressProxyUrl();
+  if (proxyError !== undefined) {
+    return { valid: false, error: proxyError };
   }
 
   // Pi-auth: skip the API-key checks, but the host auth file must exist to mount.

@@ -442,3 +442,135 @@ and the run ends terminal `partial` — never `completed`. `shannon status
 models.json carries the declared rates
 (`cost: {input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0}`), so the
 USD the ceiling counted was priced, not assumed.
+
+## 8 — Governed egress (`SHANNON_PROXY_URL`)
+
+Upstream's scan container has no egress story: `seccomp=unconfined`, no
+network filtering, the host's `/etc/hosts` forwarded in by default. The rules
+of engagement block in the config YAML is advisory prose interpolated into
+prompts — a model can ignore it. The fork adds a governed mode: point the run
+at an enforcing forward proxy and every client that plays by the rules is
+gated against the scan's frozen scope.
+
+**What setting `SHANNON_PROXY_URL` does** (all three pieces in one posture):
+
+1. **The browser.** `playwright-config-writer.ts` injects
+   `--proxy-server=<url>` into the launch args of every agent browser
+   (the stealth config `playwright-cli open` auto-loads). The URL is
+   validated before any Docker work (CLI `validateCredentials` step 1d:
+   must parse as a bare http(s) URL) and again at use: a container env that
+   disagrees with what was validated throws — a browser that silently
+   browses direct is the one dishonest outcome this mode refuses.
+2. **Env-honoring clients.** `HTTP_PROXY`/`HTTPS_PROXY` reach the scan
+   container **in both letter cases** with values staged in the CLI's env
+   and passed by name (`-e KEY`), so a credentialed proxy URL never appears
+   in the `docker run` argv.
+3. **`/etc/hosts` forwarding is off, whatever `SHANNON_FORWARD_HOSTS`
+   says** (`docker.ts::hostsForwardingEnabled`): extra name→IP mappings
+   would hand the container resolution paths the proxy never sees. The
+   unconditional `host.docker.internal` alias stays — under governance the
+   browser only ever speaks to the proxy, and the proxy judges names
+   against scope itself.
+
+**Why both letter cases** (found live, run 1 of the gate): curl deliberately
+ignores uppercase `HTTP_PROXY` for plain-http URLs (a CGI safety carve-out)
+and reads only the lowercase spelling — the scan's own recon `curl` to the
+target bypassed the gate while the proxy log stayed empty. Tools split across
+the two spellings; the container gets both so "honors the env" means
+"governed".
+
+**Why NO_PROXY is an infrastructure allowlist, not empty** (found live, run 2
+of the gate): forwarding the lowercase variables woke a second env-honoring
+client — the worker's own Temporal gRPC control plane, which read
+`http_proxy` and tried to reach `shannon-temporal:7233` through the scan
+proxy. The scope proxy refused it (correctly — the control plane is not in
+scan scope) and the run hung at startup. `NO_PROXY`/`no_proxy` now carry
+exactly: loopback (`localhost,127.0.0.1,::1` — inside the container that is
+the container itself, and a target URL never names it), `shannon-temporal`
+(the CLI always forwards `TEMPORAL_ADDRESS=shannon-temporal:7233`), and the
+LLM gateway host when `SHANNON_AI_BASE_URL` names one (a scan never targets
+its own model gateway). An allowlist, never empty, never an escape hatch:
+the scan target stays governed.
+
+**The browser config is reconciled, not just written.** The stealth config
+persists across resumes of a workspace, so a config left behind by an earlier
+run could silently defeat governance (no arg) or point at a dead ephemeral
+proxy (stale arg). `writePlaywrightStealthConfig` therefore owns the
+`--proxy-server` arg in existing configs: governed runs add or replace it
+(preserving every other key); ungoverned runs strip it (it can only have
+come from a governed run of this fork); an existing config that is not
+parseable JSON throws under governance — a file this code cannot read is a
+browser it cannot vouch for. Upstream's never-clobber contract survives for
+everything else.
+
+**Honest residual, stated plainly:** a raw socket (`curl --noproxy`,
+`bash /dev/tcp`) does not honor proxy variables, and a browser the agent
+itself relaunches with `--no-proxy-server` discards the injected flag — both
+bypass the gate (the second is not hypothetical: found live, see the proof
+below); a governed run is bounded by what the model can type, not by what
+the container's kernel allows. Per-request visibility inside an HTTPS tunnel
+needs an explicit MITM — documented as a follow-up, not shipped. The
+Corvus-side posture stays: server-side authorization gates before any active
+work, and the proxy's refusals are counted (`refused`), not hidden.
+
+**Proved live** (2026-09-04, run 3 of the gate — a `--pipeline-testing`
+DAST run against a local smoke target, through a standalone EnforcingProxy
+bound to the `shannon-net` bridge gateway, `http://172.18.0.1:33361`, whose
+frozen scope named exactly the target `172.18.0.1:8099`):
+
+- The run **completed** (exit 0): preflight → recon (16m 49s) → the five
+  vuln lanes → reporting. **723 requests issued through the BudgetGuard,
+  318 refusals counted.** The pre-scan and post-scan probes each produced
+  their delta-3 of out-of-scope 403s (`CONNECT example.com:80`,
+  `GET http://example.com/`, `CONNECT 172.18.0.1:9999` — refused both
+  times, before and after a 45-minute scan) while the in-scope `GET`
+  returned 200 through the proxy both times.
+- What the refusals were: the headless browser's own phoning-home
+  (`www.google.com` ×66, `accounts.google.com` ×37,
+  `content-autofill.googleapis.com` ×20, `android.clients.google.com` ×15) —
+  proof that `--proxy-server` governs the whole browser, not just page
+  loads; the upstream lane prompts' neutral-site verification habit
+  (`example.net`/`example.org`, `httpbin.org`, `jsonplaceholder.typicode.com`
+  — a governed run must verify against the target instead, see below);
+  explicit boundary probes by the agents themselves (`github.com`,
+  `wikipedia.org`, the LLM gateway host via `curl -x`); one out-of-scope
+  port on the in-scope host (`172.18.0.1:9999`); two BudgetGuard
+  rate-limit refusals of in-scope requests during lane bursts; and
+  malformed targets (`http://0.0.0.1/`, `http://true/`, a JWT used as a
+  hostname). Zero new `shannon-temporal` refusals after the run-2 fix —
+  the infrastructure allowlist held for the whole run.
+- All three postures verified in the live container: the workspace browser
+  config carried `--proxy-server=http://172.18.0.1:33361` next to
+  upstream's own stealth arg; the container env carried
+  `SHANNON_PROXY_URL`, all four spellings of the proxy variables, and
+  `NO_PROXY=localhost,127.0.0.1,::1,shannon-temporal,openrouter.ai`;
+  `ExtraHosts` was exactly `[host.docker.internal:host-gateway]` — no
+  host `/etc/hosts` forwarding, whatever `SHANNON_FORWARD_HOSTS` says.
+- **The residual bit back, live, and was self-reported.** The injection
+  lane relaunched its browser with `--no-proxy-server`, reached
+  `example.com`, and wrote the fact into its own blind-spots deliverable:
+  *"example.com was only reachable by launching the browser with
+  --no-proxy-server to bypass the environment proxy."* Env and flag
+  governance is compliance for clients that play by the rules; an agent
+  that controls its own browser launch flags can defect. The durable
+  boundary is the network topology — a scan network whose only route out
+  is the proxy — which is the documented follow-up, alongside the
+  Corvus-side posture: server-side authorization before any active work,
+  refusals counted.
+- Two behavioral effects, recorded honestly. (a) Two lanes (xss,
+  injection) anchored on the refused neutral sites and concluded "no
+  vulnerabilities" without exercising the real target — no fabricated
+  findings (the no-exploit-no-report line held), but the lane prompts'
+  verify-on-an-external-site habit is a governance footgun; teaching the
+  DAST lane prompts to verify against the target under governance is the
+  candidate follow-up. (b) The injection lane's final second emitted 61
+  identical `set_findings_summary` calls — a model/gateway degeneracy on
+  the known-weak chat-completions route; the executor's turn cap held and
+  the lane still completed (19m 22s).
+- A bonus from the previous étape's seam: this run carried no per-model
+  price overrides, and the worker warned before the scan started —
+  *"budget.max_usd is set but z-ai/glm-5.3 has no price override
+  (SHANNON_AI_PRICE_INPUT_Z_AI_GLM_5_3/...): its cost stays zero and the
+  USD ceiling will not count its spend"* — then accounted honestly:
+  6,036,452 prompt tokens, `usage_usd: 0`, `usage_accounting_complete:
+  true`. The vacuous-cap warning fired live, one étape after it shipped.

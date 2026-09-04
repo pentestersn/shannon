@@ -13,7 +13,7 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import type { SpinnerResult } from '@clack/prompts';
-import { envBool, PI_AUTH_CONTAINER_PATH } from './env.js';
+import { envBool, governedProxyUrl, PI_AUTH_CONTAINER_PATH } from './env.js';
 import { fail, warn } from './errors.js';
 import { getMode, isDevMode } from './mode.js';
 import { INTERNAL_DIR } from './paths.js';
@@ -354,12 +354,25 @@ function shouldSkipHostsName(name: string, hostname: string): boolean {
 }
 
 /**
+ * Whether user-added host /etc/hosts entries are forwarded into the container.
+ *
+ * Fork modification (Corvus): governed egress disables the forwarding outright —
+ * extra name→IP mappings would hand the container resolution paths the egress
+ * proxy never sees, so SHANNON_PROXY_URL wins over the flag regardless of how
+ * it is set.
+ */
+export function hostsForwardingEnabled(): boolean {
+  if (!envBool('SHANNON_FORWARD_HOSTS', true)) return false;
+  return governedProxyUrl() === undefined;
+}
+
+/**
  * Read the host's /etc/hosts and emit --add-host flags so the worker resolves
  * user-added entries the same way. Loopback IPs (127.x, ::1) are rewritten to
  * `host-gateway` so they target the host's loopback instead of the container's.
  */
 function forwardEtcHostsFlags(): string[] {
-  if (!envBool('SHANNON_FORWARD_HOSTS', true)) return [];
+  if (!hostsForwardingEnabled()) return [];
   if (os.platform() === 'win32') return [];
 
   let content: string;
