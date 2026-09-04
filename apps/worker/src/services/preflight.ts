@@ -39,11 +39,13 @@ import {
 import { glob } from 'zx';
 import {
   type CuratedProviderId,
+  collectModelPriceRates,
   collectStageModelSpecs,
   createModelRuntime,
   GENERIC_API_KEY_ENV,
   type ModelSpec,
   materializeGatewayModelsJson,
+  modelPriceEnvSuffix,
   type OpenAiFormat,
   PI_CATALOG_URL,
   piAuthPresent,
@@ -58,7 +60,7 @@ import { providerTurnError } from '../ai/pi/turn-error.js';
 import { parseConfig } from '../config-parser.js';
 import type { ActivityLogger } from '../types/activity-logger.js';
 import { ALL_AGENTS } from '../types/agents.js';
-import type { Config, Rule } from '../types/config.js';
+import type { BudgetConfig, Config, Rule } from '../types/config.js';
 import { ErrorCode } from '../types/errors.js';
 import { err, isErr, ok, type Result } from '../types/result.js';
 import { isRetryableFailure, PentestError } from './error-handling.js';
@@ -312,7 +314,7 @@ function describeAuth(providerId: string, baseUrl: string | undefined): string {
 }
 
 /** Validate the model selection and its credentials via a minimal pi session. */
-async function validateCredentials(logger: ActivityLogger): Promise<Result<void, PentestError>> {
+async function validateCredentials(logger: ActivityLogger, budget?: BudgetConfig): Promise<Result<void, PentestError>> {
   // 1. Resolve the run's model. A malformed spec or unknown provider fails here,
   //    before any scan work begins.
   let spec: ModelSpec;
@@ -371,10 +373,13 @@ async function validateCredentials(logger: ActivityLogger): Promise<Result<void,
   // Fork: read every stage-scoped model override now, so a malformed one fails
   // before any scan work begins, and materialize the gateway models.json before
   // the runtime below reads it (with the overlay in place the probe exercises
-  // the same API dialect the scan itself will use).
+  // the same API dialect the scan itself will use). Price overrides are collected
+  // in the same fail-loud pass — materializeGatewayModelsJson re-reads them while
+  // composing the overlay, so a half-pair or malformed rate fails here, named.
   let stageSpecs: ReadonlyArray<{ readonly key: string; readonly stage: string; readonly spec: ModelSpec }>;
   try {
     stageSpecs = collectStageModelSpecs();
+    collectModelPriceRates();
     materializeGatewayModelsJson();
   } catch (error) {
     return err(
@@ -466,6 +471,27 @@ async function validateCredentials(logger: ActivityLogger): Promise<Result<void,
   }
   if (credentials.baseUrl && spec.providerId === 'openai') {
     logger.info(`Gateway API: ${format} (${baseModel.api})`);
+  }
+
+  // Fork (Corvus): a USD ceiling is only as real as the prices behind it. A gateway
+  // model with no price override costs an honest zero in pi, so max_usd would never
+  // count its spend — the cap looks set but bounds nothing. Warn (not fail): a token
+  // ceiling may be the operator's actual guard, and prices may be intentionally absent
+  // on a gateway that bills elsewhere.
+  if (budget?.max_usd !== undefined && credentials.baseUrl && spec.providerId === 'openai') {
+    const priceSuffixes = new Set(collectModelPriceRates().map((entry) => entry.modelSuffix));
+    const selected = [spec, ...stageSpecs.map((entry) => entry.spec)].filter(
+      (candidate) => candidate.providerId === 'openai',
+    );
+    const unpriced = selected.filter((candidate) => !priceSuffixes.has(modelPriceEnvSuffix(candidate.modelId)));
+    if (unpriced.length > 0) {
+      const names = unpriced.map((candidate) => candidate.modelId);
+      logger.warn(
+        `budget.max_usd is set but ${names.join(', ')} has no price override ` +
+          `(SHANNON_AI_PRICE_INPUT_${modelPriceEnvSuffix(names[0] ?? '')}/...): its cost stays zero and the ` +
+          `USD ceiling will not count its spend.`,
+      );
+    }
   }
 
   // 5. One real request, so a credential the account cannot use fails here
@@ -645,7 +671,7 @@ export async function runPreflightChecks(
   }
 
   // 4. Credential check (cheap — 1 pi round-trip)
-  const credResult = await validateCredentials(logger);
+  const credResult = await validateCredentials(logger, parsedConfig?.budget);
   if (!credResult.ok) {
     return credResult;
   }

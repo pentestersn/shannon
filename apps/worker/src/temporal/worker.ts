@@ -91,7 +91,14 @@ import {
   syncPlaywrightStealthConfig,
 } from './activities.js';
 import { createReconciliationActivityRegistry } from './reconcile-activities.js';
-import type { AgenticSastInput, PipelineInput, PipelineProgress, PipelineState, TargetMode } from './shared.js';
+import type {
+  AgenticSastInput,
+  PipelineBudget,
+  PipelineInput,
+  PipelineProgress,
+  PipelineState,
+  TargetMode,
+} from './shared.js';
 
 dotenv.config();
 
@@ -531,6 +538,8 @@ async function resolveWorkspace(client: Client, args: CliArgs, expectedExploit: 
 interface OrchestrationConfig {
   agenticSast?: AgenticSastInput;
   exploit?: boolean;
+  /** Fork (Corvus): the spend ceiling from the config's `budget:` block, already numbers. */
+  budget?: PipelineBudget;
 }
 
 async function loadOrchestrationConfig(configPath: string | undefined): Promise<OrchestrationConfig> {
@@ -552,6 +561,7 @@ async function loadOrchestrationConfig(configPath: string | undefined): Promise<
         },
       }),
       exploit: distributed.exploit,
+      ...(distributed.budget !== undefined && { budget: distributed.budget }),
     };
   } catch (error) {
     // A broken config must fail the run, not silently fall back to empty
@@ -579,6 +589,7 @@ function buildPipelineInput(
     ...(args.customerOutputPath !== undefined && { customerOutputPath: args.customerOutputPath }),
     ...(orchestration.agenticSast !== undefined && { agenticSast: orchestration.agenticSast }),
     ...(orchestration.exploit !== undefined && { exploit: orchestration.exploit }),
+    ...(orchestration.budget !== undefined && { budget: orchestration.budget }),
   };
 }
 

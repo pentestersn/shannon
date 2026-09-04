@@ -87,6 +87,10 @@ function limitationMessage(reason: PartialReason): string {
       return `${classDisplayName(reason.vulnerabilityClass as ReconciliationClass)} was assessed, but its results are not included.`;
     case 'report_sarif_failed':
       return 'The SARIF report could not be generated.';
+    // Fork (Corvus): the spend ceiling. The wording stays factual for both trip points:
+    // analysis skipped outright, and analysis whose exploitation was skipped.
+    case 'budget_exhausted':
+      return 'The scan reached its spending ceiling, so some analysis or exploitation work was not run.';
   }
 }
 

@@ -36,6 +36,9 @@ export const PARTIAL_REASON_CODES = Object.freeze([
   'report_compaction_failed',
   'report_class_omitted',
   'report_sarif_failed',
+  // Fork addition (Corvus): the run's spend ceiling was reached, so the remaining
+  // analysis work was skipped instead of paid for. Code-only — no class or stage context.
+  'budget_exhausted',
 ] as const);
 
 export type PartialReasonCode = (typeof PARTIAL_REASON_CODES)[number];
@@ -235,6 +238,8 @@ export const PARTIAL_REASON_SAFE_MESSAGES: Readonly<Record<PartialReasonCode, st
     'Finding reference numbers in the report may have gaps. Every finding is present; only the numbering is affected.',
   report_class_omitted: '{Class} was assessed but could not be included in the final report.',
   report_sarif_failed: 'Report SARIF could not be generated. JSON and Markdown remain available.',
+  budget_exhausted:
+    'The scan reached its configured spending ceiling, so the remaining analysis work was skipped. Findings proven before the ceiling are in the report. Re-running this workspace with a higher ceiling retries the skipped work.',
 });
 
 /** Used in place of the stageless `agentic_sast_failed` message once a stage is recorded. */

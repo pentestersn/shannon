@@ -330,4 +330,115 @@ here rather than in the file. Verified live: the same three-model
 pipeline-testing run now reaches terminal `completed` with a blessed
 report.json (§5's live bullet).
 
+## 7 — Spend ceiling (`budget:` in the scan config YAML)
 
+Upstream measures cost (`PiPromptResult.cost`, per-agent and operational
+metrics) but never limits it — a 90-minute five-lane run on a reasoning model
+is a real bill with no brake. The fork adds a ceiling that is honest by
+construction: **a run that crosses its ceiling ends `partial` with the reason
+`budget_exhausted`, never a silent `completed`.**
+
+**Config** (closed schema, same fail-safe parsing as every other key):
+`budget: {max_usd?, max_prompt_tokens?}`, either bound alone, both positive
+numbers. FAILSAFE_SCHEMA delivers YAML scalars as strings, so the schema types
+them as strings with numeric patterns (the same reason `exploit` is a string
+enum) and `distributeBudget()` Number()-coerces fail-loud: non-finite, zero or
+negative throws `CONFIG_VALIDATION_FAILED` — zero is rejected because nobody
+means "skip all analysis". The distributed `{maxUsd?, maxPromptTokens?}`
+crosses the workflow boundary via `PipelineInput.budget`.
+
+**Arithmetic** (`apps/worker/src/temporal/budget.ts`, a pure module importing
+only a type): `promptTokensOf` counts input + cache-read + cache-write tokens
+per metric — the figures pi prices — and `pipelineSpend` sums cost and tokens
+over every agent and operational metric. Nulls are unknown spend, never
+zero-filled, so the totals are floors exactly like `totalCostUsd`. The trip
+comparison is `>=` on accumulated totals: a paid-up ceiling starts nothing new.
+
+**The guard never throws.** A throw lands in the workflow's catch and ends the
+run `failed` — the dishonest outcome for a spend limit. Instead each seam does
+`stopForBudget(phase)`: latched once (the reason is code-only
+`{code: 'budget_exhausted'}`, idempotent on append), one non-fatal journal
+entry carrying the exact spend, then `markSkipped(agent)` and the phase returns
+without running. The terminal status comes from the pre-existing rule
+`partialReasons.length > 0 ? 'partial' : 'completed'`.
+
+**Seams** (five, each before the work it stops):
+1. `runSequentialPhase` after `shouldSkip` — covers pre-recon/recon.
+2. Lane-top in `runVulnExploitPipeline` — the whole lane (vuln agent, Capella
+   join, exploit agent) is skipped; both agents `markSkipped`, the lane returns
+   `exploitDecision: null, error: null`.
+3. In-lane before the exploit agent, **after** `reconcileClass` — the class's
+   analysis is salvaged: the vuln agent's reconciled findings stay in the
+   durable exploitation queue and renumbering resumes from them on a re-run
+   with a raised ceiling. They do NOT enter the final report, though — the
+   upstream no-exploit-no-report contract holds (the dense render needs the
+   exploit agent's collector), so the class records
+   `report_class_omitted` ("was assessed but could not be included") — a
+   true statement there — beside the run-level budget reason.
+4. Miscellaneous-lane top.
+5. Miscellaneous lane, before its exploit agent (the durable record stays
+   `'expected'` — never claims work that did not run).
+
+Deliberately absent, with reasons: no seam before auth-validation or at the
+top of analysis (the accumulator is empty before the first agent, so a trip
+there could only fire on a config that means "run nothing"); the reporting
+phase is structurally exempt (the report salvages proven findings — a run that
+crosses the cap only inside the report agent ends `completed`, honestly, since
+every requested agent ran). A Capella child already in flight at trip time
+runs to settlement; the seams guard phase entry, not in-flight activities — a
+documented bounded overage.
+
+**Resume**: `markSkipped` never touches `resumeState.completedAgents`, and
+`shouldSkip` trusts only that list, so budget-skipped agents re-run when the
+workspace is resumed with a higher ceiling.
+
+**No false failure**: budget-skipped lanes return `error: null`, so
+`aggregatePipelineResults` never reads a budget stop as "every class failed"
+(which would throw into terminal `failed`).
+
+**No false assessment either** (found live, then fixed): a lane-top-skipped
+class has no deliverables, so report assembly would list it as "could not be
+included" — and the upstream `report_class_omitted` message claims the class
+"**was assessed**", which for a lane that never started is false. The
+workflow filters lane-top budget-skipped classes out of
+`recordAssemblyOmissions`; the run-level `budget_exhausted` reason is their
+only, accurate explanation. (Seam-3 classes keep the omission — see above.)
+
+**Mirrors**: the reason code lives in three places that must stay in sync —
+worker `run-state.ts` (codes + safe message), CLI `safe-fields.ts`
+(`reasonMessage` decides which reasons `status --json` shows at all; the
+sentence is byte-identical to the worker's), and `report-renderer.ts`
+(`limitationMessage`, exhaustive switch).
+
+**Per-model prices** (`SHANNON_AI_PRICE_INPUT_<MODEL>` /
+`SHANNON_AI_PRICE_OUTPUT_<MODEL>`, USD per 1M tokens, `<MODEL>` = model id
+upper-cased with non-alphanumerics folded to `_`): a gateway model has no
+catalogue price, so a USD bound would be vacuous — spend stays zero and the
+ceiling counts nothing. The pair is fed into the E4 models.json overlay as
+pi's `cost: {input, output, cacheRead: 0, cacheWrite: 0}` shape (cache priced
+free; blend a gateway's cache charge into the input rate). Pairs must be
+complete — a half-pair or malformed rate fails loud in the CLI (before any
+Docker work), at worker preflight, and in materialization. Preflight warns
+when a USD ceiling is set but a selected gateway model has no price.
+
+**`status --json`** exposes the accounting the ceiling acted on:
+`usage_usd`, `usage_prompt_tokens`, `usage_accounting_complete` (snake_case),
+each emitted only when finite and non-negative — a figure that crossed from a
+worker container this process does not control is omitted, never invented.
+
+**Proved live** (2026-09-04, `--pipeline-testing` DAST runs vs the local
+smoke server, `budget: {max_usd: "0.000001"}` and price overrides declared
+for the run's gateway model). First run — it tripped exactly as designed
+but exposed the false-assessment interaction documented above: five
+`report_class_omitted` reasons claimed the lane-top-skipped classes "were
+assessed". With the omission filter in place, the committed code's run:
+recon completes at $0.0031, the very next seam trips, all five lanes skip
+without starting an agent, the exempt report phase still runs ($0.0015),
+and the run ends terminal `partial` — never `completed`. `shannon status
+--json` reports `usage_usd: 0.0045862`, `usage_prompt_tokens: 63321`,
+`usage_accounting_complete: true`, and `partialReasons` is exactly
+`[{code: 'budget_exhausted'}]` with the safe sentence — no other reason.
+2 agents ran, 11 are listed skipped, and the run container's materialized
+models.json carries the declared rates
+(`cost: {input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0}`), so the
+USD the ceiling counted was priced, not assumed.

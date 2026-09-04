@@ -335,6 +335,12 @@ export interface PipelineSummary {
   readonly totalCostUsd: number;
   readonly totalDurationMs: number; // Wall-clock (end - start)
   readonly totalTurns: number;
+  /**
+   * Fork (Corvus): accumulated prompt tokens (input + cache read + cache write), the same
+   * count the budget guard measures. Optional here only because a summary can predate the
+   * field; the worker always sets it.
+   */
+  readonly totalPromptTokens?: number;
   readonly agentCount: number;
   /** False when operational (Capella/reconciliation) spend is known to be incomplete. */
   readonly usageAccountingComplete?: boolean;

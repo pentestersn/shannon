@@ -56,6 +56,7 @@ import {
 } from '../types/run-state.js';
 import type * as activities from './activities.js';
 import type { ActivityInput } from './activities.js';
+import { budgetExhaustedFor, budgetExhaustedMessage, type PipelineBudget, pipelineSpend } from './budget.js';
 import {
   isAcceptedTaskFormationFallbackReason,
   RECONCILIATION_ACTIVITY_PROFILES,
@@ -347,6 +348,10 @@ function computeSummary(state: PipelineState, usageAccountingComplete: boolean):
     totalCostUsd: metrics.reduce((sum, metric) => sum + (metric.costUsd ?? 0), 0),
     totalDurationMs: Date.now() - state.startTime,
     totalTurns: metrics.reduce((sum, metric) => sum + (metric.numTurns ?? 0), 0),
+    // Fork (Corvus): the token side of the ledger, counted exactly as the budget guard
+    // counts it (input + cache read + cache write). Mirrors pi's tier math; a null
+    // figure is unknown spend and contributes nothing, keeping the total a floor.
+    totalPromptTokens: pipelineSpend(metrics).promptTokens,
     agentCount: state.completedAgents.length + state.skippedAgents.length,
     usageAccountingComplete,
   };
@@ -391,6 +396,9 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
   const { workflowId } = workflowInfo();
   const a = input.pipelineTestingMode ? testActs : acts;
   const exploit = input.exploit ?? true;
+  // Fork (Corvus): the spend ceiling, already numbers. Absent means unbounded —
+  // exactly the upstream behavior — and every guard below costs one comparison.
+  const budget: PipelineBudget | undefined = input.budget;
   const sessionId = input.sessionId || input.resumeFromWorkspace || workflowId;
   const stateContext: 'fresh' | 'resume' = input.resumeFromWorkspace ? 'resume' : 'fresh';
 
@@ -438,6 +446,47 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
       (metric) => metric.usageComplete !== false,
     );
     return everyOperationalMetricComplete && !operationalSpendMissing;
+  }
+
+  // Fork (Corvus): the spend ceiling. The guard NEVER throws — a throw lands in the
+  // catch below as terminal `failed`, which is the dishonest outcome for "the operator
+  // capped the run and the cap was reached". A trip instead records one partial reason
+  // (idempotent on its identity) and one journal entry, then the callers skip the work
+  // they were about to pay for. Only this run's own accumulated metrics are counted:
+  // spend from a prior run whose publication was adopted is invisible here and flagged
+  // by usageAccountingComplete instead, so the totals stay an honest floor.
+  let budgetStopRecorded = false;
+
+  /**
+   * Fork (Corvus): classes whose lane never started because the ceiling tripped at its top.
+   * Nothing was analyzed for them, so the report must not claim they "were assessed but
+   * could not be included" — recordAssemblyOmissions filters these out; the run-level
+   * budget_exhausted reason is their only, accurate explanation. A class whose vuln agent
+   * DID run (seam 3 stopped only its exploitation) keeps the omission reason, because
+   * there the statement is true.
+   */
+  const budgetSkippedClasses = new Set<ReconciliationClass>();
+
+  function currentSpend() {
+    return pipelineSpend([...Object.values(state.agentMetrics), ...Object.values(state.operationalMetrics)]);
+  }
+
+  function budgetExhausted(): boolean {
+    return budgetExhaustedFor(currentSpend(), budget);
+  }
+
+  /**
+   * Record the trip exactly once: the first seam to trip names the phase in the journal
+   * entry, later seams skip silently (the single durable reason already explains the
+   * whole run). Agents that never ran are markSkipped, never markCompleted — shouldSkip
+   * trusts only completedAgents, so a resumed run with a raised ceiling re-runs them.
+   */
+  function stopForBudget(phase: string): void {
+    if (budgetStopRecorded || budget === undefined) return;
+    budgetStopRecorded = true;
+    addPartialReason({ code: 'budget_exhausted' });
+    addNonFatal({ phase, error: budgetExhaustedMessage(currentSpend(), budget) });
+    log.info('Spend ceiling reached; skipping remaining billable work', { code: 'BUDGET_EXHAUSTED' });
   }
 
   setHandler(
@@ -614,6 +663,15 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
       markCompleted(agentName);
       return;
     }
+    // Fork (Corvus): the spend ceiling. On today's fresh runs the accumulator is still
+    // empty before these sequential phases, so this guard is structural: it keeps the
+    // phase contract ("the guard runs before every phase") true for resumed runs, for
+    // future callers, and for any path that ever adopts prior-run metrics.
+    if (budgetExhausted()) {
+      stopForBudget(phaseName);
+      markSkipped(agentName);
+      return;
+    }
     state.currentPhase = phaseName;
     state.currentAgent = agentName;
     await a.logPhaseTransition(activityInput, phaseName, 'start');
@@ -767,6 +825,22 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
       let vulnMetrics: AgentMetrics | null = null;
       if (shouldSkip(vulnAgentName)) {
         markCompleted(vulnAgentName);
+      } else if (budgetExhausted()) {
+        // Fork (Corvus): the ceiling was reached before this lane's first billable agent.
+        // The whole lane is skipped — no Capella join, no reconciliation, no exploit —
+        // because nothing this lane paid for exists to salvage. Both agents are recorded
+        // skipped (never completed), so a resumed run with a raised ceiling re-runs them.
+        stopForBudget(vulnAgentName);
+        budgetSkippedClasses.add(vulnType);
+        markSkipped(vulnAgentName);
+        if (exploit) markSkipped(exploitAgentName);
+        return {
+          vulnType,
+          vulnMetrics: null,
+          exploitMetrics: null,
+          exploitDecision: null,
+          error: null,
+        };
       } else {
         vulnMetrics = await runVulnAgent();
         state.agentMetrics[vulnAgentName] = vulnMetrics;
@@ -785,7 +859,14 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
       reconciliationCompleted = true;
       const decision = await a.checkExploitationQueue(activityInput, vulnType);
       let exploitMetrics: AgentMetrics | null = null;
-      if (exploit && shouldSkip(exploitAgentName)) {
+      if (exploit && budgetExhausted()) {
+        // Fork (Corvus): the vuln agent ran and its findings are reconciled, so the
+        // salvage path below keeps them; only the billable exploit agent is skipped.
+        // The lane's findings reach the report unexploited, exactly like an
+        // analysis-only run.
+        stopForBudget(exploitAgentName);
+        markSkipped(exploitAgentName);
+      } else if (exploit && shouldSkip(exploitAgentName)) {
         markCompleted(exploitAgentName);
       } else if (exploit && decision.shouldExploit) {
         exploitMetrics = await runExploitAgent();
@@ -1096,6 +1177,14 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
     }
     let reconciliationCompleted = false;
     try {
+      // Fork (Corvus): the whole lane is skipped when the ceiling was reached before its
+      // first billable step — no queue seeding, no reconciliation, no admission. Durable
+      // state gains nothing for this class, so a resumed run with a raised ceiling runs
+      // the lane as if this one never reached it.
+      if (budgetExhausted()) {
+        stopForBudget('miscellaneous-pipeline');
+        return;
+      }
       await seedMiscellaneousActs.seedEmptyProducerQueue({ sessionId });
       await reconcileClass('miscellaneous', effectiveSarif);
       reconciliationCompleted = true;
@@ -1108,6 +1197,15 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
       } else {
         const admitted = await deterministicReportActs.persistMiscellaneousOutcome(activityInput, 'expected');
         applyDurableSummary(admitted);
+        if (budgetExhausted()) {
+          // Fork (Corvus): the class is admitted and its findings reconciled, so the
+          // salvage contract keeps them; only the exploit agent is skipped. The durable
+          // record stays at 'expected' — never 'completed' — so the outcome claims no
+          // agent that ran, and a resumed run re-runs the lane.
+          stopForBudget('miscellaneous-exploit');
+          markSkipped('miscellaneous-exploit');
+          return;
+        }
         if (!shouldSkip('miscellaneous-exploit'))
           state.agentMetrics['miscellaneous-exploit'] = await a.runMiscellaneousExploitAgent(activityInput);
         markCompleted('miscellaneous-exploit');
@@ -1144,6 +1242,10 @@ export async function pentestPipeline(input: PipelineInput): Promise<PipelineSta
 
   function recordAssemblyOmissions(failedClasses: readonly ReconciliationClass[]): void {
     for (const vulnerabilityClass of failedClasses) {
+      // Fork (Corvus): a class whose lane never started (ceiling tripped at the lane top)
+      // was not assessed — the omission message would claim it was. The run-level
+      // budget_exhausted reason already states the truth for these classes.
+      if (budgetSkippedClasses.has(vulnerabilityClass)) continue;
       // The append rules drop the omission when the class already carries an upstream reason.
       addPartialReason({ code: 'report_class_omitted', vulnerabilityClass });
       const isAnalysisClass = (ALL_VULN_CLASSES as readonly string[]).includes(vulnerabilityClass);

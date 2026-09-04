@@ -237,6 +237,106 @@ export function stageMaxTokensEnvName(stage: string): string {
   return `${STAGE_MAX_TOKENS_ENV_PREFIX}${stageEnvSuffix(stage)}`;
 }
 
+// ---------------------------------------------------------------------------
+// Fork modification (Corvus): per-model price overrides.
+//
+// A gateway model id has no measured pricing — pi prices it at an honest zero, which
+// makes a USD spend ceiling vacuous: no agent ever accumulates cost. These overrides
+// declare what a model costs per million tokens (USD) so `calculateCost` produces real
+// figures and the budget guard has something true to compare. Token ceilings
+// (`max_prompt_tokens`) are unaffected: tokens are counted regardless of price.
+//
+// SHANNON_AI_PRICE_INPUT_<MODEL>  — USD per 1M input tokens
+// SHANNON_AI_PRICE_OUTPUT_<MODEL> — USD per 1M output tokens
+//
+// <MODEL> is the model id uppercased with runs of non-alphanumerics collapsed to `_`,
+// the same folding as stage suffixes: `z-ai/glm-5.3` reads Z_AI_GLM_5_3. Cache rates
+// default to zero (the fork declares no cache-price variables): cache traffic then
+// prices as free, which under-counts on gateways that charge for it — set the input
+// rate to an effective blended rate if that matters. Both variables of a pair must be
+// set together; a half-pair fails loud rather than pricing one side of every request.
+// ---------------------------------------------------------------------------
+
+/** Prefix of the per-model input-price override (`SHANNON_AI_PRICE_INPUT_<MODEL>`). */
+export const MODEL_PRICE_INPUT_ENV_PREFIX = 'SHANNON_AI_PRICE_INPUT_';
+
+/** Prefix of the per-model output-price override (`SHANNON_AI_PRICE_OUTPUT_<MODEL>`). */
+export const MODEL_PRICE_OUTPUT_ENV_PREFIX = 'SHANNON_AI_PRICE_OUTPUT_';
+
+/** Suffix a model id contributes to its price vars: uppercased, non-alphanumerics collapsed to `_`. */
+export function modelPriceEnvSuffix(modelId: string): string {
+  return modelId.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+}
+
+/** What one model costs per million tokens, in the shape pi's `ModelCostRates` reads. */
+export interface ModelPriceRates {
+  readonly input: number;
+  readonly output: number;
+}
+
+/** Must parse as a price: a plain non-negative decimal in USD per 1M tokens. */
+const PRICE_VALUE_PATTERN = /^\d+(\.\d+)?$/;
+
+/**
+ * Every per-model price override the environment carries, as `{ key, modelSuffix, rates }`
+ * in sorted key order. Near-miss variables fail loud — a lower-case suffix or a value
+ * that is not a plain decimal is a mispriced cap, never a silently ignored variable.
+ * A half-pair (input without output, or the reverse) throws naming both keys: pricing
+ * one side of every request would silently under-count spend against a USD ceiling.
+ */
+export function collectModelPriceRates(): ReadonlyArray<{
+  readonly key: string;
+  readonly modelSuffix: string;
+  readonly rates: ModelPriceRates;
+}> {
+  const inputs = new Map<string, { key: string; value: string }>();
+  const outputs = new Map<string, { key: string; value: string }>();
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined || !value.trim()) continue;
+    const collect = (prefix: string, into: Map<string, { key: string; value: string }>): boolean => {
+      if (!key.startsWith(prefix)) return false;
+      const suffix = key.slice(prefix.length);
+      if (!/^[A-Z0-9_]+$/.test(suffix)) {
+        throw new Error(
+          `${key} is not a valid model price variable. Use ${prefix}<MODEL> with the ` +
+            `model id uppercased and non-alphanumerics collapsed to \`_\`, e.g. ` +
+            `${prefix}${modelPriceEnvSuffix('z-ai/glm-5.3')}.`,
+        );
+      }
+      if (!PRICE_VALUE_PATTERN.test(value.trim())) {
+        throw new Error(`${key} must be a plain non-negative decimal in USD per 1M tokens (got "${value.trim()}").`);
+      }
+      into.set(suffix, { key, value: value.trim() });
+      return true;
+    };
+    if (collect(MODEL_PRICE_INPUT_ENV_PREFIX, inputs)) continue;
+    collect(MODEL_PRICE_OUTPUT_ENV_PREFIX, outputs);
+  }
+
+  const entries: { key: string; modelSuffix: string; rates: ModelPriceRates }[] = [];
+  const suffixes = new Set([...inputs.keys(), ...outputs.keys()]);
+  for (const suffix of suffixes) {
+    const input = inputs.get(suffix);
+    const output = outputs.get(suffix);
+    if (input === undefined || output === undefined) {
+      const inputName = input === undefined ? `${MODEL_PRICE_INPUT_ENV_PREFIX}${suffix}` : input.key;
+      const outputName = output === undefined ? `${MODEL_PRICE_OUTPUT_ENV_PREFIX}${suffix}` : output.key;
+      throw new Error(
+        `Model price overrides come in pairs: ${inputName} and ${outputName} must be set together. ` +
+          `Price both sides or neither — pricing one side of every request would silently ` +
+          `under-count spend against a USD ceiling.`,
+      );
+    }
+    entries.push({
+      key: input.key,
+      modelSuffix: suffix,
+      rates: { input: Number(input.value), output: Number(output.value) },
+    });
+  }
+  entries.sort((a, b) => a.key.localeCompare(b.key));
+  return entries;
+}
+
 /**
  * Every stage-scoped model var the environment carries, as `{ key, stage, spec }`
  * in sorted key order. Keys under the fork's SHANNON_AI_MODEL_ namespace that do
@@ -516,9 +616,13 @@ export function gatewayModelsJsonPath(): string {
  * needs this — the responses format is served faithfully by the builtin path,
  * and every other provider has exactly one API. An existing models.json is left
  * untouched: an operator who wrote one owns the composition (their entry wins,
- * and the format variable is then advisory). Cost on a declared entry is zero —
- * a gateway id has no measured pricing; the serving provider's own usage
- * figures are the honest source until per-run price overrides exist.
+ * and the format variable is then advisory).
+ *
+ * Fork (Corvus): cost on a declared entry is zero unless the operator set
+ * SHANNON_AI_PRICE_INPUT_<MODEL>/SHANNON_AI_PRICE_OUTPUT_<MODEL> for it — a
+ * gateway id has no measured pricing of its own. With rates set, the entry
+ * carries them in pi's per-million-token shape and `calculateCost` prices real
+ * requests, which is what makes a USD budget ceiling mean anything on this path.
  *
  * The write is atomic (temp file + rename) so parallel lane activities that
  * resolve models concurrently can never read a half-written file, and identical
@@ -539,16 +643,25 @@ export function materializeGatewayModelsJson(target: string = gatewayModelsJsonP
   if (existsSync(target)) return undefined;
 
   const limits = resolveGatewayLimits();
+  const priceRates = new Map(collectModelPriceRates().map((entry) => [entry.modelSuffix, entry.rates]));
   const document = {
     providers: {
       openai: {
         baseUrl,
-        models: openAiSpecs.map((spec) => ({
-          id: spec.modelId,
-          api: OPENAI_FORMATS['chat-completions'],
-          contextWindow: limits.contextWindow,
-          maxTokens: limits.maxTokens,
-        })),
+        models: openAiSpecs.map((spec) => {
+          const rates = priceRates.get(modelPriceEnvSuffix(spec.modelId));
+          return {
+            id: spec.modelId,
+            api: OPENAI_FORMATS['chat-completions'],
+            contextWindow: limits.contextWindow,
+            maxTokens: limits.maxTokens,
+            // Fork (Corvus): USD per 1M tokens. Cache rates stay zero — the fork declares
+            // no cache-price variables — so cache traffic prices as free on this path.
+            ...(rates !== undefined && {
+              cost: { input: rates.input, output: rates.output, cacheRead: 0, cacheWrite: 0 },
+            }),
+          };
+        }),
       },
     },
   };

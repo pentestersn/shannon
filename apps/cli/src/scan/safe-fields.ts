@@ -154,6 +154,11 @@ function reasonMessage(reason: PartialReasonView): string | undefined {
         : `${className} was assessed but could not be included in the final report.`;
     case 'report_sarif_failed':
       return 'Report SARIF could not be generated. JSON and Markdown remain available.';
+    case 'budget_exhausted':
+      // Fork (Corvus): must stay verbatim identical to the worker's
+      // PARTIAL_REASON_SAFE_MESSAGES.budget_exhausted — this switch is the closed set
+      // that decides whether a reason survives into status --json at all.
+      return 'The scan reached its configured spending ceiling, so the remaining analysis work was skipped. Findings proven before the ceiling are in the report. Re-running this workspace with a higher ceiling retries the skipped work.';
     default:
       return undefined;
   }
@@ -275,4 +280,15 @@ export function safeFailureDetail(hasFailure: boolean): string | undefined {
 /** Same closed-set trade-off as safeFailureDetail, for the scan-level (not per-agent) failure. */
 export function safeTerminalFailure(hasFailure: boolean): string | undefined {
   return hasFailure ? 'The scan could not be completed.' : undefined;
+}
+
+/**
+ * Fork (Corvus): a usage figure crossing from the worker container into status --json.
+ * The summary travels through Temporal from a container this process does not control,
+ * so the same fail-closed rule as the text fields applies: a finite non-negative number
+ * passes, anything else (NaN, negative, non-finite, non-number) collapses to undefined
+ * and the key is omitted rather than emitted as a lie.
+ */
+export function safeUsageAmount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }

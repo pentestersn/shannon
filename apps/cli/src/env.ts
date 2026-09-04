@@ -21,6 +21,7 @@ import {
   PROVIDER_CREDENTIAL_HINT,
   PROVIDER_EXTRA_ENV,
   resolveModelSpec,
+  validateModelPriceVars,
 } from './model-spec.js';
 
 /**
@@ -45,18 +46,22 @@ const COMMON_FORWARD_VARS = [
 ] as const;
 
 /**
- * Fork modification (Corvus): stage-scoped model routing. Every well-formed
- * stage override is forwarded by pattern — there are more stages than anyone
- * wants to list, and an unset one must never appear in the container. Only
- * upper-case stage names match; validateCredentials rejects anything else up
- * front, so a near-miss variable can never slip into a scan silently.
+ * Fork modification (Corvus): stage-scoped model routing and per-model prices.
+ * Every well-formed stage override is forwarded by pattern — there are more
+ * stages than anyone wants to list, and an unset one must never appear in the
+ * container. Only upper-case stage names match; validateCredentials rejects
+ * anything else up front, so a near-miss variable can never slip into a scan
+ * silently. The price variables follow the same pattern-forwarding rule: the
+ * worker composes them into the models.json overlay, and the CLI has no reason
+ * to know which model ids the run selects.
  */
 const STAGE_MODEL_VAR = /^SHANNON_AI_MODEL_[A-Z0-9_]+$/;
 const STAGE_MAX_TOKENS_VAR = /^SHANNON_AI_MAX_TOKENS_[A-Z0-9_]+$/;
+const MODEL_PRICE_VAR = /^SHANNON_AI_PRICE_(INPUT|OUTPUT)_[A-Z0-9_]+$/;
 
 function stageForwardVars(): string[] {
   return Object.keys(process.env)
-    .filter((key) => STAGE_MODEL_VAR.test(key) || STAGE_MAX_TOKENS_VAR.test(key))
+    .filter((key) => STAGE_MODEL_VAR.test(key) || STAGE_MAX_TOKENS_VAR.test(key) || MODEL_PRICE_VAR.test(key))
     .sort();
 }
 
@@ -236,6 +241,14 @@ export function validateCredentials(): CredentialValidation {
   const stageEntries = collectStageModelSpecs();
   if (typeof stageEntries === 'string') {
     return { valid: false, error: stageEntries };
+  }
+
+  // 1c. Fork: the per-model price variables must be well-formed pairs — a half-pair
+  //     or malformed rate would make a USD budget ceiling count the wrong spend.
+  //     Same rule as 1b: fail here, before any Docker work.
+  const priceError = validateModelPriceVars();
+  if (priceError !== undefined) {
+    return { valid: false, error: priceError };
   }
 
   // Pi-auth: skip the API-key checks, but the host auth file must exist to mount.

@@ -86,6 +86,21 @@ export interface AgenticSastConfig {
   enabled: 'true' | 'false';
 }
 
+/**
+ * Fork addition (Corvus): the run's spend ceiling. Both fields are strings in the
+ * YAML form — the schema is validated under YAML's FAILSAFE_SCHEMA, which parses
+ * every plain scalar as a string (the same reason `exploit` is a string enum).
+ * `distributeConfig` coerces them to numbers and fails loud on anything that is
+ * not a finite non-negative decimal, so a malformed ceiling can never become a
+ * NaN comparison that silently never trips.
+ */
+export interface BudgetConfig {
+  /** Maximum accumulated model spend in USD. The scan turns `partial` at or beyond it. */
+  max_usd?: string;
+  /** Maximum accumulated prompt tokens (input + cache read + cache write). */
+  max_prompt_tokens?: string;
+}
+
 export interface Config {
   rules?: Rules;
   authentication?: Authentication;
@@ -94,10 +109,18 @@ export interface Config {
   exploit?: 'true' | 'false';
   report?: ReportConfig;
   rules_of_engagement?: string;
+  /** Fork addition (Corvus): spend ceiling; absent means no ceiling. */
+  budget?: BudgetConfig;
 }
 
 /** Report config after coercion. The YAML form of `sarif` is a string (see ReportConfig). */
 export type DistributedReportConfig = Omit<ReportConfig, 'sarif'> & { sarif: boolean };
+
+/** Budget after coercion: at least one bound, both finite and positive. */
+export interface DistributedBudget {
+  maxUsd?: number;
+  maxPromptTokens?: number;
+}
 
 export interface DistributedConfig {
   avoid: Rule[];
@@ -109,6 +132,8 @@ export interface DistributedConfig {
   exploit: boolean;
   report: DistributedReportConfig;
   rules_of_engagement: string;
+  /** Present only when the config set a spend ceiling. */
+  budget?: DistributedBudget;
 }
 
 /**

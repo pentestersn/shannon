@@ -177,6 +177,28 @@
       "maxLength": 1000,
       "description": "Free-text instructions to the agent that render into every prompt."
     },
+    "budget": {
+      "type": "object",
+      "description": "Fork (Corvus): spend ceiling for the scan. At or beyond a bound, remaining analysis work is skipped and the scan finishes as \"partial\" with a budget_exhausted reason; the report and the findings proven before the ceiling are still produced. At least one bound must be set. Values are strings (YAML FAILSAFE_SCHEMA); the parser coerces them and rejects anything that is not a finite positive decimal.",
+      "properties": {
+        "max_usd": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?$",
+          "minLength": 1,
+          "maxLength": 12,
+          "description": "Maximum accumulated model spend in USD (e.g. \"25\" or \"25.50\")."
+        },
+        "max_prompt_tokens": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "minLength": 1,
+          "maxLength": 15,
+          "description": "Maximum accumulated prompt tokens (input + cache read + cache write), e.g. \"20000000\"."
+        }
+      },
+      "minProperties": 1,
+      "additionalProperties": false
+    },
     "login": {
       "type": "object",
       "description": "Deprecated: Use 'authentication' section instead",
@@ -198,7 +220,8 @@
     { "required": ["agentic_sast"] },
     { "required": ["exploit"] },
     { "required": ["report"] },
-    { "required": ["rules_of_engagement"] }
+    { "required": ["rules_of_engagement"] },
+    { "required": ["budget"] }
   ],
   "additionalProperties": false,
   "$defs": {

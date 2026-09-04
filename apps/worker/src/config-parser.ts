@@ -10,7 +10,14 @@ import type { FormatsPlugin } from 'ajv-formats';
 import yaml from 'js-yaml';
 import { fs } from 'zx';
 import { PentestError } from './services/error-handling.js';
-import type { Authentication, Config, DistributedConfig, Rule } from './types/config.js';
+import type {
+  Authentication,
+  BudgetConfig,
+  Config,
+  DistributedBudget,
+  DistributedConfig,
+  Rule,
+} from './types/config.js';
 import { ErrorCode } from './types/errors.js';
 
 /**
@@ -21,8 +28,8 @@ import { ErrorCode } from './types/errors.js';
  * false`, so an unrecognized field anywhere in the config is a hard validation failure
  * rather than a silently ignored typo. There is no public way to select which analysis
  * classes run; the schema only exposes steering knobs (rules, authentication,
- * agentic_sast.enabled, exploit, report, rules_of_engagement) on top of the fixed
- * five-class pipeline.
+ * agentic_sast.enabled, exploit, report, rules_of_engagement, budget) on top of the
+ * fixed five-class pipeline.
  */
 
 // Handle ESM/CJS interop for ajv-formats using require
@@ -403,7 +410,8 @@ const validateConfig = (config: Config): void => {
     !!config.agentic_sast ||
     config.exploit !== undefined ||
     !!config.report ||
-    !!config.rules_of_engagement;
+    !!config.rules_of_engagement ||
+    !!config.budget;
   if (!hasAnySteering) {
     console.warn('⚠️  Configuration file contains no steering fields. The pentest will run with all defaults.');
   } else if (config.rules && !config.rules.avoid && !config.rules.focus) {
@@ -702,6 +710,14 @@ export const distributeConfig = (config: Config | null): DistributedConfig => {
 
   const rules_of_engagement = config?.rules_of_engagement?.trim() ?? '';
 
+  // Fork (Corvus): the budget bounds arrive as strings (FAILSAFE_SCHEMA) already
+  // pattern-checked by the schema; coerce here and fail loud on anything the pattern
+  // could not have caught on its own. A NaN bound would make every comparison in the
+  // workflow guard false forever — a ceiling that never trips — so this throws instead
+  // of letting a malformed bound reach the pipeline. Zero is rejected too: a ceiling
+  // of nothing means "skip all analysis", which no one means to configure.
+  const budget = distributeBudget(config?.budget);
+
   return {
     avoid: avoid.map(sanitizeRule),
     focus: focus.map(sanitizeRule),
@@ -711,8 +727,52 @@ export const distributeConfig = (config: Config | null): DistributedConfig => {
     exploit,
     report,
     rules_of_engagement,
+    ...(budget !== undefined && { budget }),
   };
 };
+
+/**
+ * Fork (Corvus): coerce the YAML budget block into numbers. Returns undefined when the
+ * block is absent; throws a PentestError when a bound is present but unusable. The
+ * schema guarantees the shape (closed object, at least one bound, numeric string
+ * patterns), so this only re-verifies what Number() does with an already-bounded string.
+ */
+function distributeBudget(budget: BudgetConfig | undefined): DistributedBudget | undefined {
+  if (budget === undefined) return undefined;
+  const bounds: { field: string; raw: string | undefined; name: keyof DistributedBudget }[] = [
+    { field: 'budget.max_usd', raw: budget.max_usd, name: 'maxUsd' },
+    { field: 'budget.max_prompt_tokens', raw: budget.max_prompt_tokens, name: 'maxPromptTokens' },
+  ];
+  const distributed: DistributedBudget = {};
+  let any = false;
+  for (const bound of bounds) {
+    if (bound.raw === undefined) continue;
+    const value = Number(bound.raw);
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new PentestError(
+        `${bound.field} must be a positive number (got "${bound.raw}")`,
+        'config',
+        false,
+        { field: bound.field, value: bound.raw },
+        ErrorCode.CONFIG_VALIDATION_FAILED,
+      );
+    }
+    distributed[bound.name] = value;
+    any = true;
+  }
+  // The schema's minProperties already guarantees one bound; keeping the check here
+  // means a future schema edit cannot reintroduce an empty ceiling silently.
+  if (!any) {
+    throw new PentestError(
+      'budget must set at least one of max_usd or max_prompt_tokens',
+      'config',
+      false,
+      {},
+      ErrorCode.CONFIG_VALIDATION_FAILED,
+    );
+  }
+  return distributed;
+}
 
 const sanitizeAuthentication = (auth: Authentication): Authentication => {
   return {

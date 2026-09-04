@@ -91,6 +91,15 @@ export interface NonFatalFailure {
 /** Fork addition (Corvus): 'dast' selects the black-box prompt set. Re-exported for the workflow boundary. */
 export type { TargetMode } from '../types/config.js';
 
+/**
+ * Fork addition (Corvus): the spend ceiling crossing the workflow boundary. Defined
+ * once in budget.ts (the pure decision module) and re-exported here so the workflow
+ * input contract stays the single import site consumers already use.
+ */
+import type { PipelineBudget } from './budget.js';
+
+export type { PipelineBudget };
+
 export interface PipelineInput {
   webUrl: string;
   repoPath: string;
@@ -113,6 +122,7 @@ export interface PipelineInput {
   customerOutputPath?: string; // Stable mounted path for final customer copies only
   checkpointsEnabled?: boolean; // Enable checkpoint activities (default: false)
   exploit?: boolean; // false skips the exploitation phase
+  budget?: PipelineBudget; // Fork (Corvus): spend ceiling; absent means no ceiling
 }
 
 /** What `loadResumeState` reconstructs from a prior workspace: independently verified, never assumed from session.json alone. */
@@ -175,6 +185,13 @@ export interface PipelineSummary {
   totalCostUsd: number;
   totalDurationMs: number; // Wall-clock time (end - start)
   totalTurns: number;
+  /**
+   * Fork addition (Corvus): accumulated prompt tokens — input plus cache read plus cache
+   * write, mirroring how pi's tier math and the budget guard count a request's input side.
+   * A floor, not an exact figure, exactly like totalCostUsd: spend from a prior run whose
+   * publication was adopted is flagged by `usageAccountingComplete` instead of invented.
+   */
+  totalPromptTokens: number;
   /** Total resolved agents: those that ran plus those that were skipped. */
   agentCount: number;
   /** False when operational (Capella/reconciliation) spend is known to be incomplete. */

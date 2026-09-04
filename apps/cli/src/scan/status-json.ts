@@ -16,6 +16,7 @@ import {
   safePartialReasons,
   safeTemporalStatus,
   safeTerminalFailure,
+  safeUsageAmount,
 } from './safe-fields.js';
 
 /** Coarse scan status token, mirroring the human status badge in machine-friendly form. */
@@ -47,6 +48,16 @@ export interface StatusJson {
   };
   /** False when operational (Capella/reconciliation) spend is known to be incomplete. */
   readonly usageAccountingComplete?: boolean;
+  /**
+   * Fork (Corvus): the run's accumulated model spend in USD. Present once the worker's
+   * summary exists (a terminal or resumed scan); omitted rather than zero-invented when
+   * the figure is unknown or the worker predates the field.
+   */
+  readonly usage_usd?: number;
+  /** Fork (Corvus): accumulated prompt tokens (input + cache read + cache write). */
+  readonly usage_prompt_tokens?: number;
+  /** Snake_case mirror of usageAccountingComplete for the fork's machine consumers. */
+  readonly usage_accounting_complete?: boolean;
   readonly phases: readonly DerivedPhase[];
 }
 
@@ -77,6 +88,8 @@ export function toStatusJson(input: RenderInput, now: number): StatusJson {
   const partialReasons = safePartialReasons(input.state?.partialReasons ?? []);
   const agenticSast = safeAgenticSast(input.state?.agenticSast);
   const usageAccountingComplete = input.state?.summary?.usageAccountingComplete;
+  const usageUsd = safeUsageAmount(input.state?.summary?.totalCostUsd);
+  const usagePromptTokens = safeUsageAmount(input.state?.summary?.totalPromptTokens);
   const failureMessage = safeTerminalFailure(input.failureMessage !== undefined);
 
   return {
@@ -100,6 +113,11 @@ export function toStatusJson(input: RenderInput, now: number): StatusJson {
         },
       }),
     ...(usageAccountingComplete !== undefined && { usageAccountingComplete }),
+    // Fork (Corvus): machine-facing usage. Each key appears only when the figure is
+    // known and finite — an unknown spend is omitted, never reported as zero.
+    ...(usageUsd !== undefined && { usage_usd: usageUsd }),
+    ...(usagePromptTokens !== undefined && { usage_prompt_tokens: usagePromptTokens }),
+    ...(usageAccountingComplete !== undefined && { usage_accounting_complete: usageAccountingComplete }),
     phases: derivePipeline(input, now),
   };
 }

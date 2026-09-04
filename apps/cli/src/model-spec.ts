@@ -156,3 +156,80 @@ export function collectStageModelSpecs(): StageModelEntry[] | string {
   }
   return entries;
 }
+
+/**
+ * Per-model price overrides (fork). Mirrors the worker's price machinery: the same
+ * prefixes, the same suffix folding, the same failure text. The CLI only validates —
+ * the worker's preflight re-checks and composes the rates into the models.json
+ * overlay — so this returns undefined when every variable is well-formed, and the
+ * worker's error string (naming the offending variable) when one is not.
+ */
+export const MODEL_PRICE_INPUT_ENV_PREFIX = 'SHANNON_AI_PRICE_INPUT_';
+
+export const MODEL_PRICE_OUTPUT_ENV_PREFIX = 'SHANNON_AI_PRICE_OUTPUT_';
+
+/** Must parse as a price: a plain non-negative decimal in USD per 1M tokens. Mirrors the worker. */
+const PRICE_VALUE_PATTERN = /^\d+(\.\d+)?$/;
+
+/** Fold a model id into its price-var suffix: `z-ai/glm-5.3` -> `Z_AI_GLM_5_3`. Mirrors the worker. */
+export function modelPriceEnvSuffix(modelId: string): string {
+  return modelId.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+}
+
+/** The env var pair naming one model's prices. Mirrors the worker. */
+export function modelPriceEnvNames(modelId: string): { input: string; output: string } {
+  const suffix = modelPriceEnvSuffix(modelId);
+  return { input: `${MODEL_PRICE_INPUT_ENV_PREFIX}${suffix}`, output: `${MODEL_PRICE_OUTPUT_ENV_PREFIX}${suffix}` };
+}
+
+/**
+ * Validate every price variable the environment carries. Returns undefined when all
+ * are well-formed pairs, else the worker-identical error string. Same fail-loud rules:
+ * a lower-case suffix, a non-decimal value, or a half-pair is a mispriced ceiling,
+ * never a silently ignored variable.
+ */
+export function validateModelPriceVars(): string | undefined {
+  const inputs = new Set<string>();
+  const outputs = new Set<string>();
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined || !value.trim()) continue;
+    let prefix: string;
+    if (key.startsWith(MODEL_PRICE_INPUT_ENV_PREFIX)) prefix = MODEL_PRICE_INPUT_ENV_PREFIX;
+    else if (key.startsWith(MODEL_PRICE_OUTPUT_ENV_PREFIX)) prefix = MODEL_PRICE_OUTPUT_ENV_PREFIX;
+    else continue;
+    const suffix = key.slice(prefix.length);
+    if (!/^[A-Z0-9_]+$/.test(suffix)) {
+      return (
+        `${key} is not a valid model price variable. Use ${prefix}<MODEL> with the ` +
+        `model id uppercased and non-alphanumerics collapsed to \`_\`, e.g. ` +
+        `${prefix}${modelPriceEnvSuffix('z-ai/glm-5.3')}.`
+      );
+    }
+    if (!PRICE_VALUE_PATTERN.test(value.trim())) {
+      return `${key} must be a plain non-negative decimal in USD per 1M tokens (got "${value.trim()}").`;
+    }
+    if (prefix === MODEL_PRICE_INPUT_ENV_PREFIX) inputs.add(suffix);
+    else outputs.add(suffix);
+  }
+  for (const suffix of [...inputs].sort()) {
+    if (!outputs.has(suffix)) {
+      return (
+        `Model price overrides come in pairs: ${MODEL_PRICE_INPUT_ENV_PREFIX}${suffix} and ` +
+        `${MODEL_PRICE_OUTPUT_ENV_PREFIX}${suffix} must be set together. Price both sides or ` +
+        `neither — pricing one side of every request would silently under-count spend against a ` +
+        `USD ceiling.`
+      );
+    }
+  }
+  for (const suffix of [...outputs].sort()) {
+    if (!inputs.has(suffix)) {
+      return (
+        `Model price overrides come in pairs: ${MODEL_PRICE_OUTPUT_ENV_PREFIX}${suffix} and ` +
+        `${MODEL_PRICE_INPUT_ENV_PREFIX}${suffix} must be set together. Price both sides or ` +
+        `neither — pricing one side of every request would silently under-count spend against a ` +
+        `USD ceiling.`
+      );
+    }
+  }
+  return undefined;
+}
